@@ -43,6 +43,8 @@ private:
 
     // saving
     bool saveAll(bool restart);
+    QStringList emptyDirCandidates(const QStringList &deletedFiles) const;
+    QStringList checkTargets(const QStringList &writes, const QStringList &deletes) const;
     bool writeFiles(const QMap<QString, QByteArray> &writes, const QStringList &deletes, bool restart, QString *log);
 
     // types
@@ -53,6 +55,7 @@ private:
     void duplicateType();
     void deleteType();
     void showRulesOfType();
+    void reorganizeTypes();
     void openTypeDialog(const EntryPtr &original, const EntryPtr &templ);
 
     // rules

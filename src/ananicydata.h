@@ -39,14 +39,23 @@ struct ConfFile {
     bool existed = false;
     bool dirty = false;
     int loadedEntries = 0;   // number of entries when read from disk
+    QByteArray diskHash;     // SHA-1 of the file as read (empty = did not exist)
     QVector<ConfLine> lines;
 
     QString render(const QStringList &keyOrder) const;
     int entryCount() const;
-    // A file that had entries (or is new) and now has none is removed instead of written.
-    bool shouldDelete() const { return dirty && existed && loadedEntries > 0 && entryCount() == 0; }
+    bool hasOtherContent() const; // lines that are neither entries, comments nor blank (e.g. broken JSON)
+    // A file that had entries and now has nothing but comments/blank lines left is removed
+    // instead of written. Files with any other content (e.g. unparsable lines) are kept.
+    bool shouldDelete() const
+    {
+        return dirty && existed && loadedEntries > 0 && entryCount() == 0 && !hasOtherContent();
+    }
     bool shouldSkip() const { return !existed && entryCount() == 0; }
 };
+
+QByteArray fileHash(const QString &path);       // SHA-1 of the file on disk, empty if it does not exist
+QByteArray contentHash(const QByteArray &data); // SHA-1 of data
 
 // A collection of JSON-line files (all *.rules, or all *.types ...).
 class EntryStore {
@@ -61,7 +70,9 @@ public:
     ConfFile *fileFor(const QString &path); // existing or newly created (empty) file
     EntryPtr add(const QString &filePath, const QString &primaryValue);
     void remove(const EntryPtr &e);
-    void moveTo(const EntryPtr &e, const QString &filePath); // keeps the entry's text, moves it to another file
+    // Keeps the entry's text and moves it to the end of another file. With reappend, an entry
+    // that is already in that file is moved to its end too (used to keep load order when merging).
+    void moveTo(const EntryPtr &e, const QString &filePath, bool reappend = false);
     void markModified(const EntryPtr &e);
 
     EntryPtr find(const QString &primaryValue) const;
@@ -70,6 +81,7 @@ public:
 
     QMap<QString, QByteArray> pendingWrites() const; // path -> new content for dirty files
     QStringList pendingDeletes() const;              // files that lost all their entries
+    bool loadedHash(const QString &path, QByteArray *hash) const; // false if the file is unknown
     void markSaved();
 
     const QVector<EntryPtr> &entries() const { return m_entries; }
@@ -92,6 +104,7 @@ public:
     QString path;
     bool existed = false;
     bool dirty = false;
+    QByteArray diskHash; // SHA-1 of the file as read (empty = did not exist)
 
     void load(const QString &path);
     bool has(const QString &key) const;

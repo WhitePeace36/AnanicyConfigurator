@@ -96,7 +96,7 @@ MainWindow::MainWindow(const QString &rootDir, QWidget *parent)
     : QMainWindow(parent), m_root(QDir(rootDir).absolutePath())
 {
     m_rulesDir = m_root + QStringLiteral("/99-rules");
-    m_newTypesFile = m_root + QStringLiteral("/00-types.types");
+    m_newTypesFile = m_root + QStringLiteral("/99-types.types");
 
     resize(1400, 900);
 
@@ -173,6 +173,8 @@ QWidget *MainWindow::buildTypesPane()
     auto *edit = new QPushButton(tr("Edit…"));
     auto *dup = new QPushButton(tr("Duplicate…"));
     auto *del = new QPushButton(tr("Delete"));
+    auto *reorgTypes = new QPushButton(tr("Move all into 99-types.types"));
+    reorgTypes->setToolTip(tr("Move every type into %1").arg(m_newTypesFile));
     auto *show = new QPushButton(tr("Show its rules"));
     show->setToolTip(tr("Filter the rules list below by the selected type"));
     btns->addWidget(add);
@@ -180,6 +182,8 @@ QWidget *MainWindow::buildTypesPane()
     btns->addWidget(dup);
     btns->addWidget(del);
     btns->addWidget(show);
+    btns->addSpacing(16);
+    btns->addWidget(reorgTypes);
     btns->addStretch(1);
     btns->addWidget(new QLabel(tr("Double-click a type to edit it")));
     left->addLayout(btns);
@@ -191,6 +195,7 @@ QWidget *MainWindow::buildTypesPane()
     connect(dup, &QPushButton::clicked, this, &MainWindow::duplicateType);
     connect(del, &QPushButton::clicked, this, &MainWindow::deleteType);
     connect(show, &QPushButton::clicked, this, &MainWindow::showRulesOfType);
+    connect(reorgTypes, &QPushButton::clicked, this, &MainWindow::reorganizeTypes);
     connect(m_typeView, &QTableView::activated, this, &MainWindow::editType); // double-click / Enter
     auto *sc = new QShortcut(QKeySequence::Delete, m_typeView);
     sc->setContext(Qt::WidgetShortcut);
@@ -593,6 +598,34 @@ bool MainWindow::saveAll(bool restart)
         return true;
     }
 
+    // Safety checks before anything is written or deleted.
+    const QStringList problems = checkTargets(writes.keys(), deletes);
+    if (!problems.isEmpty()) {
+        QMessageBox box(QMessageBox::Critical, tr("Nothing was saved"),
+                        tr("Saving was stopped because %n file(s) are not safe to change. "
+                           "If files were changed on disk, use \"Reload from disk\" and redo your changes.",
+                           nullptr, problems.size()),
+                        QMessageBox::Ok, this);
+        box.setInformativeText(problems.mid(0, 8).join(QLatin1Char('\n')) + (problems.size() > 8 ? QStringLiteral("\n…") : QString()));
+        box.setDetailedText(problems.join(QLatin1Char('\n')));
+        box.exec();
+        return false;
+    }
+    if (!deletes.isEmpty()) {
+        QStringList rel;
+        for (const QString &p : deletes)
+            rel << QDir(m_root).relativeFilePath(p);
+        rel.sort();
+        QMessageBox box(QMessageBox::Question, tr("Delete files"),
+                        tr("Saving will delete %n file(s) that no longer contain any rules or types "
+                           "(only comments or blank lines are left). Continue?", nullptr, deletes.size()),
+                        QMessageBox::Yes | QMessageBox::Cancel, this);
+        box.setInformativeText(rel.mid(0, 10).join(QLatin1Char('\n')) + (rel.size() > 10 ? QStringLiteral("\n…") : QString()));
+        box.setDetailedText(rel.join(QLatin1Char('\n')));
+        if (box.exec() != QMessageBox::Yes)
+            return false;
+    }
+
     QString log;
     setEnabled(false);
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -610,6 +643,7 @@ bool MainWindow::saveAll(bool restart)
     if (m_conf.dirty) {
         m_conf.dirty = false;
         m_conf.existed = true;
+        m_conf.diskHash = contentHash(m_conf.render());
     }
     m_typeModel->allChanged();
     m_ruleModel->allChanged();
@@ -619,7 +653,7 @@ bool MainWindow::saveAll(bool restart)
     QString msg = (writes.isEmpty() && deletes.isEmpty()) ? tr("No changes to write.")
                                                           : tr("Saved %n file(s).", nullptr, writes.size());
     if (!deletes.isEmpty())
-        msg += QLatin1Char(' ') + tr("Removed %n empty file(s) (kept as .bak).", nullptr, deletes.size());
+        msg += QLatin1Char(' ') + tr("Removed %n file(s) that had no entries left.", nullptr, deletes.size());
     if (restart) {
         QString state;
         runProcess(QStringLiteral("systemctl"),
@@ -632,6 +666,83 @@ bool MainWindow::saveAll(bool restart)
     }
     statusBar()->showMessage(msg, 10000);
     return true;
+}
+
+// Every file that is about to be written or deleted must be inside the config directory,
+// must not be (or be reached through) a symlink, and must still have exactly the content
+// it had when it was loaded. Returns one message per problem.
+QStringList MainWindow::checkTargets(const QStringList &writes, const QStringList &deletes) const
+{
+    QStringList problems;
+    const QString root = QDir::cleanPath(m_root);
+    auto check = [&](const QString &path, bool deleting) {
+        const QString p = QDir::cleanPath(path);
+        const QString rel = QDir(root).relativeFilePath(p);
+        if (!p.startsWith(root + QLatin1Char('/'))) {
+            problems << tr("%1: outside %2").arg(p, root);
+            return;
+        }
+        const QFileInfo fi(p);
+        if (fi.isSymLink()) {
+            problems << tr("%1: is a symbolic link (to %2); linked files are not changed").arg(rel, fi.symLinkTarget());
+            return;
+        }
+        if (fi.exists() && !fi.isFile()) {
+            problems << tr("%1: is not a regular file").arg(rel);
+            return;
+        }
+        for (QString d = QFileInfo(p).absolutePath(); d.startsWith(root + QLatin1Char('/')); d = QFileInfo(d).absolutePath()) {
+            if (QFileInfo(d).isSymLink()) {
+                problems << tr("%1: its folder %2 is a symbolic link").arg(rel, QDir(root).relativeFilePath(d));
+                return;
+            }
+        }
+        QByteArray expected;
+        bool known = m_types.loadedHash(p, &expected) || m_rules.loadedHash(p, &expected);
+        if (!known && p == QDir::cleanPath(m_conf.path)) {
+            expected = m_conf.diskHash;
+            known = true;
+        }
+        if (!known) {
+            problems << tr("%1: was never loaded by this program").arg(rel);
+            return;
+        }
+        const QByteArray current = fileHash(p);
+        if (current != expected) {
+            if (expected.isEmpty())
+                problems << tr("%1: did not exist when loading, but exists now").arg(rel);
+            else if (current.isEmpty())
+                problems << tr("%1: was deleted on disk since it was loaded").arg(rel);
+            else
+                problems << tr("%1: was changed on disk since it was loaded%2")
+                                .arg(rel, deleting ? tr(" (it would have been deleted)") : QString());
+        }
+    };
+    for (const QString &p : writes)
+        check(p, false);
+    for (const QString &p : deletes)
+        check(p, true);
+    return problems;
+}
+
+// Directories that may have become empty after deleting files: their parents up to (not
+// including) the config root, deepest first.
+QStringList MainWindow::emptyDirCandidates(const QStringList &deletedFiles) const
+{
+    QStringList dirs;
+    const QString root = QDir::cleanPath(m_root);
+    for (const QString &f : deletedFiles) {
+        QString d = QDir::cleanPath(QFileInfo(f).absolutePath());
+        while (d.startsWith(root + QLatin1Char('/')) && d != root) {
+            if (!dirs.contains(d))
+                dirs << d;
+            d = QFileInfo(d).absolutePath();
+        }
+    }
+    std::sort(dirs.begin(), dirs.end(), [](const QString &a, const QString &b) {
+        return a.count(QLatin1Char('/')) > b.count(QLatin1Char('/'));
+    });
+    return dirs;
 }
 
 bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, const QStringList &deletes, bool restart,
@@ -663,23 +774,20 @@ bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, const QStri
         for (auto it = writes.begin(); it != writes.end(); ++it) {
             const QString path = it.key();
             QDir().mkpath(QFileInfo(path).absolutePath());
-            if (QFile::exists(path)) {
-                QFile::remove(path + QStringLiteral(".bak"));
-                QFile::copy(path, path + QStringLiteral(".bak"));
-            }
             QSaveFile f(path);
             if (!f.open(QIODevice::WriteOnly) || f.write(it.value()) != it.value().size() || !f.commit()) {
                 *log = tr("Writing %1 failed: %2").arg(path, f.errorString());
                 return false;
             }
         }
-        for (const QString &path : deletes) { // "delete" = rename to .bak
-            QFile::remove(path + QStringLiteral(".bak"));
-            if (QFile::exists(path) && !QFile::rename(path, path + QStringLiteral(".bak"))) {
+        for (const QString &path : deletes) {
+            if (QFile::exists(path) && !QFile::remove(path)) {
                 *log = tr("Removing %1 failed").arg(path);
                 return false;
             }
         }
+        for (const QString &dir : emptyDirCandidates(deletes))
+            QDir().rmdir(dir); // only succeeds if the directory is empty
         if (restart) {
             QStringList args{QStringLiteral("restart"), svc};
             const int rc = isRoot ? runProcess(QStringLiteral("systemctl"), args, log)
@@ -709,14 +817,12 @@ bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, const QStri
             return false;
         }
         f.close();
-        const QString dest = shellQuote(it.key());
-        const QString bak = shellQuote(it.key() + QStringLiteral(".bak"));
-        script += QStringLiteral("if [ -f %1 ]; then cp -f %1 %2; fi\n").arg(dest, bak);
-        script += QStringLiteral("install -D -m 0644 %1 %2\n").arg(shellQuote(staged), dest);
+        script += QStringLiteral("install -D -m 0644 %1 %2\n").arg(shellQuote(staged), shellQuote(it.key()));
     }
-    for (const QString &path : deletes) // "delete" = rename to .bak
-        script += QStringLiteral("if [ -f %1 ]; then mv -f %1 %2; fi\n")
-                      .arg(shellQuote(path), shellQuote(path + QStringLiteral(".bak")));
+    for (const QString &path : deletes)
+        script += QStringLiteral("rm -f %1\n").arg(shellQuote(path));
+    for (const QString &dir : emptyDirCandidates(deletes)) // only removed if empty
+        script += QStringLiteral("rmdir %1 2>/dev/null || true\n").arg(shellQuote(dir));
     if (restart)
         script += QStringLiteral("systemctl restart %1\n").arg(shellQuote(svc));
 
@@ -1199,6 +1305,25 @@ void MainWindow::placeNewRule(const EntryPtr &e)
 
 void MainWindow::reorganizeRules()
 {
+    // Duplicates with different types would land in different files, which can change
+    // which copy wins. Offer to clean them up first.
+    int dupNames = 0;
+    for (auto it = m_nameCount.cbegin(); it != m_nameCount.cend(); ++it)
+        if (it.value() > 1)
+            ++dupNames;
+    if (dupNames > 0) {
+        const auto r = QMessageBox::question(
+            this, tr("Reorganize rules"),
+            tr("%n process name(s) have more than one rule. After reorganizing, copies with different "
+               "types end up in different files, which can change which copy Ananicy uses.\n\n"
+               "Remove the duplicates first?", nullptr, dupNames),
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+        if (r == QMessageBox::Cancel)
+            return;
+        if (r == QMessageBox::Yes)
+            removeDuplicateRules();
+    }
+
     QVector<EntryPtr> toMove;
     QSet<ConfFile *> sources;
     QSet<QString> targets;
@@ -1228,14 +1353,20 @@ void MainWindow::reorganizeRules()
     }
     const QString q = tr("Move %1 rules into %2/<type>.rules?\n\n"
                          "Rules without a type go to custom.rules. This creates or updates %3 files in %2, "
-                         "and %4 old files that end up with no rules are removed (kept as .bak).\n\n"
+                         "and %4 old files that end up with no rules are deleted.\n\n"
                          "Nothing is written until you press Save.")
                           .arg(toMove.size()).arg(m_rulesDir).arg(targets.size()).arg(emptied);
     if (QMessageBox::question(this, tr("Reorganize rules"), q) != QMessageBox::Yes)
         return;
 
-    for (const auto &r : toMove)
-        m_rules.moveTo(r, ruleFileFor(r->str(QStringLiteral("type"))));
+    // Re-add every rule of each receiving file in load order, so that for duplicate names the
+    // copy that came last before still comes last afterwards.
+    const QVector<EntryPtr> all = m_rules.entries();
+    for (const auto &r : all) {
+        const QString target = ruleFileFor(r->str(QStringLiteral("type")));
+        if (targets.contains(target))
+            m_rules.moveTo(r, target, true);
+    }
     m_ruleModel->reset();
     recomputeUsage();
     updateDirtyState();
@@ -1285,5 +1416,44 @@ void MainWindow::removeDuplicateRules()
     m_typeModel->allChanged();
     updateDirtyState();
     statusBar()->showMessage(tr("Removed %n duplicate rule(s). Press Save to write the changes.", nullptr, drop.size()),
+                             10000);
+}
+
+void MainWindow::reorganizeTypes()
+{
+    const QString target = QDir::cleanPath(m_newTypesFile);
+    int toMove = 0;
+    QSet<ConfFile *> sources;
+    for (const auto &t : m_types.entries()) {
+        if (!t->file || QDir::cleanPath(t->file->path) != target) {
+            ++toMove;
+            if (t->file)
+                sources.insert(t->file);
+        }
+    }
+    if (toMove == 0) {
+        QMessageBox::information(this, tr("Reorganize types"), tr("All types are already in %1.").arg(target));
+        return;
+    }
+    QStringList files;
+    for (ConfFile *f : sources)
+        files << QDir(m_root).relativeFilePath(f->path);
+    files.sort();
+    const QString q = tr("Move %1 types into %2?\n\n"
+                         "These files will have no types left and are deleted on save "
+                         "(comments in them are not moved):\n%3\n\n"
+                         "Nothing is written until you press Save.")
+                          .arg(toMove).arg(target, files.join(QLatin1Char('\n')));
+    if (QMessageBox::question(this, tr("Reorganize types"), q) != QMessageBox::Yes)
+        return;
+
+    // Re-add all types in load order, so that if a type is defined twice the copy that
+    // came last before still comes last (and wins) afterwards.
+    const QVector<EntryPtr> all = m_types.entries();
+    for (const auto &t : all)
+        m_types.moveTo(t, target, true);
+    m_typeModel->reset();
+    updateDirtyState();
+    statusBar()->showMessage(tr("Moved %1 types into %2. Press Save to write the changes.").arg(toMove).arg(target),
                              10000);
 }

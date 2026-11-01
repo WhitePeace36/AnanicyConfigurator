@@ -32,7 +32,7 @@ A GUI editor for [Ananicy](https://github.com/Nefelim4ag/Ananicy) and ananicy-cp
 | New rule with a type | `/etc/ananicy.d/99-rules/<type>.rules`, e.g. `99-rules/game.rules` |
 | New rule without a type | `/etc/ananicy.d/99-rules/custom.rules` |
 | Changed existing type | the same file it was loaded from |
-| New type | `/etc/ananicy.d/00-types.types` |
+| New type | `/etc/ananicy.d/99-types.types` |
 | ananicy.conf settings | `/etc/ananicy.d/ananicy.conf` |
 
 A new rule follows its type until it is saved: if you change its type before saving, it moves to
@@ -40,17 +40,35 @@ the matching file. Characters that aren't safe in a file name become `_` (type `
 `a_b.rules`). A type named `custom` uses `type-custom.rules`, because `custom.rules` is reserved
 for rules without a type.
 
-**Reorganize into 99-rules/…** moves every rule into this structure. **Remove duplicates…**
+**Move all into 99-types.types** (under the types list) moves every type into that one file.
+**Reorganize into 99-rules/…** moves every rule into the structure above. If some process names
+have more than one rule, it first offers to remove the duplicates. Otherwise copies with
+different types would end up in different files, which can change which copy Ananicy uses.
+**Remove duplicates…**
 keeps one rule per process name and deletes the other copies. For each name it keeps the copy in
 the file that sorts last, so a rule in `99-rules` wins over one in `00-default`. Rules that are
 duplicates are shown in red until you remove them. Neither button writes anything until you
 press Save.
 
 Comments, blank lines, formatting of untouched lines and unknown keys are preserved byte-for-byte.
-Only files that actually changed are written. Before each save, the previous version is copied to
-`<file>.bak`. A file that ends up with no rules (for example after reorganizing) is not deleted
-but renamed to `<file>.bak`. Ananicy only loads `*.rules` / `*.types`, so it ignores these
-backups.
+Only files that actually changed are written; no backup copies are made. A file that ends up with
+no rules or types (for example after reorganizing) is deleted, along with any folders that are
+left empty. Comments in a deleted file are not kept.
+
+### Safety checks before saving
+
+- The program refuses to start with `/` or a top-level folder (such as `/etc`, `/usr` or
+  `/home`) as its config directory, so it never even reads files all over the system.
+- Only `*.rules` / `*.types` files the program loaded itself, plus `ananicy.conf`, are ever
+  written or deleted, and only inside the config directory. Folders are only removed when they
+  are empty, and never the config directory itself.
+- Symlinked folders are not followed (ananicy-cpp doesn't follow them either), and symlinked
+  files are never written or deleted.
+- If any file changed on disk after it was loaded (e.g. by a package update), nothing is saved:
+  use "Reload from disk" and redo your changes.
+- A file is only deleted if nothing but comments and blank lines is left in it. A file that still
+  has lines the program couldn't read is kept.
+- Before deleting files, the program lists them and asks for confirmation.
 
 ## Root permissions
 

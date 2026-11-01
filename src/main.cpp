@@ -2,6 +2,10 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDir>
+#include <QMessageBox>
+
+#include <cstdio>
 
 int main(int argc, char *argv[])
 {
@@ -21,7 +25,18 @@ int main(int argc, char *argv[])
     parser.addOption(rootOpt);
     parser.process(app);
 
-    MainWindow w(parser.value(rootOpt));
+    // Refuse "/" and top-level folders such as /etc, /usr or /home as config directory, so
+    // the program never even reads (let alone changes) files all over the system.
+    const QString root = QDir::cleanPath(QDir(parser.value(rootOpt)).absolutePath());
+    if (root.split(QLatin1Char('/'), Qt::SkipEmptyParts).size() < 2) {
+        const QString msg = QStringLiteral("Refusing to use \"%1\" as configuration directory.\n"
+                                           "Use the ananicy directory itself, e.g. /etc/ananicy.d.").arg(root);
+        fprintf(stderr, "%s\n", qPrintable(msg));
+        QMessageBox::critical(nullptr, QStringLiteral("Ananicy Configurator"), msg);
+        return 2;
+    }
+
+    MainWindow w(root);
     w.show();
     return app.exec();
 }

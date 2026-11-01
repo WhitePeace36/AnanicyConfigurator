@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -155,6 +156,33 @@ QString ConfFile::render(const QStringList &keyOrder) const
     return out;
 }
 
+QByteArray contentHash(const QByteArray &data)
+{
+    return QCryptographicHash::hash(data, QCryptographicHash::Sha1);
+}
+
+QByteArray fileHash(const QString &path)
+{
+    QFile f(path);
+    if (!QFileInfo::exists(path))
+        return {};
+    if (!f.open(QIODevice::ReadOnly))
+        return QByteArrayLiteral("unreadable");
+    return contentHash(f.readAll());
+}
+
+bool ConfFile::hasOtherContent() const
+{
+    for (const ConfLine &l : lines) {
+        if (l.entry)
+            continue;
+        const QString t = l.raw.trimmed();
+        if (!t.isEmpty() && !t.startsWith(QLatin1Char('#')))
+            return true;
+    }
+    return false;
+}
+
 int ConfFile::entryCount() const
 {
     int n = 0;
@@ -184,7 +212,9 @@ void EntryStore::loadFile(const QString &path)
     file->path = path;
     file->existed = true;
 
-    QString content = QString::fromUtf8(f.readAll());
+    const QByteArray raw = f.readAll();
+    file->diskHash = contentHash(raw);
+    QString content = QString::fromUtf8(raw);
     if (content.endsWith(QLatin1Char('\n')))
         content.chop(1);
     const QStringList lines = content.isEmpty() ? QStringList() : content.split(QLatin1Char('\n'));
@@ -219,9 +249,11 @@ void EntryStore::loadFile(const QString &path)
 void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recursive)
 {
     QStringList paths;
+    // Like ananicy-cpp (std::filesystem::recursive_directory_iterator), do not descend into
+    // symlinked directories. This also guarantees that nothing outside the config
+    // directory is ever written or deleted through such a link.
     QDirIterator it(dir, QStringList{pattern}, QDir::Files | QDir::Readable,
-                    recursive ? QDirIterator::Subdirectories | QDirIterator::FollowSymlinks
-                              : QDirIterator::NoIteratorFlags);
+                    recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
     while (it.hasNext())
         paths << it.next();
     paths.sort(); // ananicy loads in alphabetical order
@@ -238,6 +270,7 @@ ConfFile *EntryStore::fileFor(const QString &path)
     auto file = std::make_unique<ConfFile>();
     file->path = clean;
     file->existed = QFileInfo::exists(clean);
+    file->diskHash = fileHash(clean); // a not-loaded existing file will fail the safety check on save
     ConfFile *raw = file.get();
     m_files.push_back(std::move(file));
     return raw;
@@ -272,10 +305,10 @@ void EntryStore::remove(const EntryPtr &e)
     m_entries.removeAll(e);
 }
 
-void EntryStore::moveTo(const EntryPtr &e, const QString &filePath)
+void EntryStore::moveTo(const EntryPtr &e, const QString &filePath, bool reappend)
 {
     ConfFile *target = fileFor(filePath);
-    if (!e || e->file == target)
+    if (!e || (e->file == target && !reappend))
         return;
     if (ConfFile *old = e->file) {
         for (int i = 0; i < old->lines.size(); ++i) {
@@ -334,6 +367,18 @@ QMap<QString, QByteArray> EntryStore::pendingWrites() const
     return out;
 }
 
+bool EntryStore::loadedHash(const QString &path, QByteArray *hash) const
+{
+    const QString clean = QDir::cleanPath(path);
+    for (const auto &f : m_files) {
+        if (QDir::cleanPath(f->path) == clean) {
+            *hash = f->diskHash;
+            return true;
+        }
+    }
+    return false;
+}
+
 QStringList EntryStore::pendingDeletes() const
 {
     QStringList out;
@@ -352,6 +397,7 @@ void EntryStore::markSaved()
             f->lines.clear();
             f->existed = false;
             f->loadedEntries = 0;
+            f->diskHash.clear();
             f->dirty = false;
             continue;
         }
@@ -364,6 +410,7 @@ void EntryStore::markSaved()
         f->dirty = false;
         f->existed = true;
         f->loadedEntries = f->entryCount();
+        f->diskHash = contentHash(f->render(m_keyOrder).toUtf8());
     }
 }
 
@@ -376,10 +423,13 @@ void MainConf::load(const QString &p)
     dirty = false;
     m_sep = QStringLiteral("=");
     QFile f(p);
+    diskHash.clear();
     existed = f.open(QIODevice::ReadOnly | QIODevice::Text);
     if (!existed)
         return;
-    QString content = QString::fromUtf8(f.readAll());
+    const QByteArray raw = f.readAll();
+    diskHash = contentHash(raw);
+    QString content = QString::fromUtf8(raw);
     if (content.endsWith(QLatin1Char('\n')))
         content.chop(1);
     bool sepDetected = false;

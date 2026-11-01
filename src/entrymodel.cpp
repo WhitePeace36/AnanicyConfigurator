@@ -109,17 +109,28 @@ QString EntryModel::relPath(const QString &path) const
 
 // ---------------------------------------------------------------- proxy
 
+// Qt 6.10 replaced invalidateFilter() by beginFilterChange()/endFilterChange().
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+#define FILTER_CHANGE_BEGIN() beginFilterChange()
+#define FILTER_CHANGE_END() endFilterChange(QSortFilterProxyModel::Direction::Rows)
+#else
+#define FILTER_CHANGE_BEGIN() ((void)0)
+#define FILTER_CHANGE_END() invalidateFilter()
+#endif
+
 void EntryFilterProxy::setText(const QString &t)
 {
+    FILTER_CHANGE_BEGIN();
     m_text = t.trimmed();
-    invalidateFilter();
+    FILTER_CHANGE_END();
 }
 
 void EntryFilterProxy::setExact(int column, const QString &value)
 {
+    FILTER_CHANGE_BEGIN();
     m_exactCol = column;
     m_exactVal = value;
-    invalidateFilter();
+    FILTER_CHANGE_END();
 }
 
 bool EntryFilterProxy::filterAcceptsRow(int row, const QModelIndex &parent) const
