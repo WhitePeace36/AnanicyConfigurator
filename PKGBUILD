@@ -21,7 +21,7 @@ pkgdesc="Qt GUI to edit ananicy / ananicy-cpp types, rules and ananicy.conf"
 arch=('x86_64' 'aarch64')
 url="https://github.com/WhitePeace36/AnanicyConfigurator"
 license=('GPL-2.0-only')
-depends=('qt6-base' 'polkit' 'systemd' 'gcc-libs' 'glibc')
+depends=('qt6-base' 'polkit' 'systemd' 'hicolor-icon-theme' 'gcc-libs' 'glibc')
 makedepends=('cmake')
 optdepends=('ananicy-cpp: the daemon this program configures'
             'ananicy: original ananicy daemon (alternative to ananicy-cpp)')

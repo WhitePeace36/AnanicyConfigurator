@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QIcon>
 #include <QMessageBox>
 
 #include <cstdio>
@@ -14,6 +15,12 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("ananicy-gui"));
     QApplication::setApplicationDisplayName(QStringLiteral("Ananicy Configurator"));
     QApplication::setApplicationVersion(QStringLiteral("1.0"));
+    QApplication::setDesktopFileName(QStringLiteral("ananicy-gui")); // lets Wayland compositors find the icon
+
+    QIcon icon;
+    for (int size : {16, 24, 32, 48, 64, 128, 256})
+        icon.addFile(QStringLiteral(":/icons/%1.png").arg(size), QSize(size, size));
+    QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("ananicy-configurator"), icon));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("GUI editor for ananicy / ananicy-cpp configuration"));

@@ -1,6 +1,20 @@
-# Ananicy Configurator (Qt / C++)
+<p align="center">
+  <img src="icons/ananicy-configurator.svg" width="96" height="96" alt="Ananicy Configurator icon">
+</p>
 
-A GUI editor for [Ananicy](https://github.com/Nefelim4ag/Ananicy) and ananicy-cpp configuration.
+<h1 align="center">Ananicy Configurator</h1>
+
+<p align="center">
+  A Qt / C++ GUI editor for <a href="https://github.com/Nefelim4ag/Ananicy">Ananicy</a> and
+  <a href="https://gitlab.com/ananicy-cpp/ananicy-cpp">ananicy-cpp</a> configuration.
+</p>
+
+![Main window with the types list at the top and the rules list at the bottom](docs/screenshot-main.png)
+
+<p align="center">
+  <img src="docs/screenshot-rule-dialog.png" alt="Edit dialog for a rule, with the optional overrides unfolded">
+  <br><em>Editing a rule: pick a type, optionally unfold the per-rule overrides.</em>
+</p>
 
 ## Features
 
@@ -89,7 +103,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/ananicy-gui
 
-# optional: install to /usr/local (binary + .desktop entry)
+# optional: install to /usr/local (binary, .desktop entry and icon)
 sudo cmake --install build
 ```
 
@@ -111,8 +125,8 @@ makepkg -si
 ```
 
 The build files go to `build/`, and the finished package (`ananicy-configurator-*.pkg.tar.zst`)
-is written to the project root. The package installs `/usr/bin/ananicy-gui` and a desktop entry
-("Ananicy Configurator").
+is written to the project root. The package installs `/usr/bin/ananicy-gui`, a desktop entry
+("Ananicy Configurator") and the app icon.
 
 To rebuild after changing or pulling the code, run `makepkg -sif`. To uninstall, run
 `sudo pacman -R ananicy-configurator`.

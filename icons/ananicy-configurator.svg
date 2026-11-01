@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Ananicy Configurator</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#4f5fe8"/>
+      <stop offset="1" stop-color="#1f2a7a"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#bg)"/>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#gloss)"/>
+
+  <!-- slider tracks -->
+  <g stroke="#ffffff" stroke-opacity="0.22" stroke-width="18" stroke-linecap="round">
+    <line x1="74" y1="62" x2="74" y2="194"/>
+    <line x1="128" y1="62" x2="128" y2="194"/>
+    <line x1="182" y1="62" x2="182" y2="194"/>
+  </g>
+
+  <!-- levels: high, medium, low priority -->
+  <g stroke-width="18" stroke-linecap="round">
+    <line x1="74" y1="88" x2="74" y2="194" stroke="#3ddc97"/>
+    <line x1="128" y1="136" x2="128" y2="194" stroke="#ffb547"/>
+    <line x1="182" y1="170" x2="182" y2="194" stroke="#ff6b6b"/>
+  </g>
+
+  <!-- knobs -->
+  <g stroke-width="7">
+    <circle cx="74" cy="88" r="21" fill="#ffffff" stroke="#3ddc97"/>
+    <circle cx="128" cy="136" r="21" fill="#ffffff" stroke="#ffb547"/>
+    <circle cx="182" cy="170" r="21" fill="#ffffff" stroke="#ff6b6b"/>
+  </g>
+</svg>
