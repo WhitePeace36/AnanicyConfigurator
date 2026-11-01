@@ -278,6 +278,8 @@ void EntryEditor::updateHints()
             info = m_describe(t);
         m_typeInfo->setFullText(t.isEmpty() ? tr("No type: only the overrides apply") : info);
     }
+    if (m_fileFn && m_entry)
+        m_fileLabel->setFullText(m_fileFn(*m_entry));
     if (m_overridesToggle) {
         const int n = overrideCount();
         m_overridesToggle->setText(n == 0 ? tr("Overrides (optional)")

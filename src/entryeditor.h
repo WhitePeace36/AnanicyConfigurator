@@ -30,6 +30,8 @@ public:
     void focusType();
 
     void setFileHint(const QString &text); // shown instead of the entry's file (for new entries)
+    // computes the file shown in the "File:" row from the edited entry (e.g. follows the type)
+    void setFileHintFn(std::function<QString(const Entry &)> fn) { m_fileFn = std::move(fn); updateHints(); }
     void setTypeNames(const QStringList &names);
     void setCgroupNames(const QStringList &names);
     void setTypeDescriber(std::function<QString(const QString &)> fn) { m_describe = std::move(fn); }
@@ -63,4 +65,5 @@ private:
     QStringList m_typeNames;
     QStringList m_cgroupNames;
     std::function<QString(const QString &)> m_describe;
+    std::function<QString(const Entry &)> m_fileFn;
 };

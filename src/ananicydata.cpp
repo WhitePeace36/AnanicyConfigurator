@@ -155,6 +155,15 @@ QString ConfFile::render(const QStringList &keyOrder) const
     return out;
 }
 
+int ConfFile::entryCount() const
+{
+    int n = 0;
+    for (const ConfLine &l : lines)
+        if (l.entry)
+            ++n;
+    return n;
+}
+
 // ---------------------------------------------------------------- EntryStore
 
 void EntryStore::clear()
@@ -203,6 +212,7 @@ void EntryStore::loadFile(const QString &path)
         }
         file->lines.append(cl);
     }
+    file->loadedEntries = file->entryCount();
     m_files.push_back(std::move(file));
 }
 
@@ -262,6 +272,25 @@ void EntryStore::remove(const EntryPtr &e)
     m_entries.removeAll(e);
 }
 
+void EntryStore::moveTo(const EntryPtr &e, const QString &filePath)
+{
+    ConfFile *target = fileFor(filePath);
+    if (!e || e->file == target)
+        return;
+    if (ConfFile *old = e->file) {
+        for (int i = 0; i < old->lines.size(); ++i) {
+            if (old->lines[i].entry == e) {
+                old->lines.remove(i);
+                break;
+            }
+        }
+        old->dirty = true;
+    }
+    target->lines.append({QString(), e});
+    target->dirty = true;
+    e->file = target;
+}
+
 void EntryStore::markModified(const EntryPtr &e)
 {
     e->modified = true;
@@ -300,8 +329,17 @@ QMap<QString, QByteArray> EntryStore::pendingWrites() const
 {
     QMap<QString, QByteArray> out;
     for (const auto &f : m_files)
-        if (f->dirty)
+        if (f->dirty && !f->shouldDelete() && !f->shouldSkip())
             out.insert(f->path, f->render(m_keyOrder).toUtf8());
+    return out;
+}
+
+QStringList EntryStore::pendingDeletes() const
+{
+    QStringList out;
+    for (const auto &f : m_files)
+        if (f->shouldDelete())
+            out << f->path;
     return out;
 }
 
@@ -310,6 +348,13 @@ void EntryStore::markSaved()
     for (auto &f : m_files) {
         if (!f->dirty)
             continue;
+        if (f->shouldDelete() || f->shouldSkip()) {
+            f->lines.clear();
+            f->existed = false;
+            f->loadedEntries = 0;
+            f->dirty = false;
+            continue;
+        }
         for (ConfLine &l : f->lines) {
             if (l.entry && (l.entry->modified || l.entry->originalLine.isEmpty())) {
                 l.entry->originalLine = l.entry->serialize(m_keyOrder);
@@ -318,6 +363,7 @@ void EntryStore::markSaved()
         }
         f->dirty = false;
         f->existed = true;
+        f->loadedEntries = f->entryCount();
     }
 }
 

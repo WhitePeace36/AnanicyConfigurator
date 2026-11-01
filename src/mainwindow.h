@@ -43,7 +43,7 @@ private:
 
     // saving
     bool saveAll(bool restart);
-    bool writeFiles(const QMap<QString, QByteArray> &writes, bool restart, QString *log);
+    bool writeFiles(const QMap<QString, QByteArray> &writes, const QStringList &deletes, bool restart, QString *log);
 
     // types
     EntryPtr currentType() const;
@@ -63,6 +63,10 @@ private:
     void editRule();
     void createRule(const QString &name);
     void deleteRules();
+    void reorganizeRules();
+    void removeDuplicateRules();
+    QString ruleFileFor(const QString &type) const; // 99-rules/<type>.rules or 99-rules/custom.rules
+    void placeNewRule(const EntryPtr &e);           // unsaved rules follow their type's file
     void openRuleDialog(const EntryPtr &original, const QString &newName);
     void refreshRuleTypeFilter();
     void applyRuleTypeFilter();
@@ -74,7 +78,7 @@ private:
     void removeConfKey();
 
     QString m_root;
-    QString m_newRulesFile;
+    QString m_rulesDir;
     QString m_newTypesFile;
 
     EntryStore m_types{QStringLiteral("type"), typeKeyOrder()};
@@ -82,6 +86,7 @@ private:
     EntryStore m_cgroups{QStringLiteral("cgroup"), {QStringLiteral("cgroup")}};
     MainConf m_conf;
     QMap<QString, int> m_usage;
+    QHash<QString, int> m_nameCount; // rules per process name (duplicates > 1)
 
     EntryModel *m_typeModel = nullptr;
     EntryModel *m_ruleModel = nullptr;

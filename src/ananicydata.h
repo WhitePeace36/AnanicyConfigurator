@@ -38,9 +38,14 @@ struct ConfFile {
     QString path;
     bool existed = false;
     bool dirty = false;
+    int loadedEntries = 0;   // number of entries when read from disk
     QVector<ConfLine> lines;
 
     QString render(const QStringList &keyOrder) const;
+    int entryCount() const;
+    // A file that had entries (or is new) and now has none is removed instead of written.
+    bool shouldDelete() const { return dirty && existed && loadedEntries > 0 && entryCount() == 0; }
+    bool shouldSkip() const { return !existed && entryCount() == 0; }
 };
 
 // A collection of JSON-line files (all *.rules, or all *.types ...).
@@ -56,6 +61,7 @@ public:
     ConfFile *fileFor(const QString &path); // existing or newly created (empty) file
     EntryPtr add(const QString &filePath, const QString &primaryValue);
     void remove(const EntryPtr &e);
+    void moveTo(const EntryPtr &e, const QString &filePath); // keeps the entry's text, moves it to another file
     void markModified(const EntryPtr &e);
 
     EntryPtr find(const QString &primaryValue) const;
@@ -63,6 +69,7 @@ public:
     bool isDirty() const;
 
     QMap<QString, QByteArray> pendingWrites() const; // path -> new content for dirty files
+    QStringList pendingDeletes() const;              // files that lost all their entries
     void markSaved();
 
     const QVector<EntryPtr> &entries() const { return m_entries; }

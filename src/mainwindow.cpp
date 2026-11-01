@@ -95,7 +95,7 @@ QTableView *makeTable()
 MainWindow::MainWindow(const QString &rootDir, QWidget *parent)
     : QMainWindow(parent), m_root(QDir(rootDir).absolutePath())
 {
-    m_newRulesFile = m_root + QStringLiteral("/00-default/custom.rules");
+    m_rulesDir = m_root + QStringLiteral("/99-rules");
     m_newTypesFile = m_root + QStringLiteral("/00-types.types");
 
     resize(1400, 900);
@@ -242,6 +242,8 @@ QWidget *MainWindow::buildRulesPane()
         const QString t = e.str(QStringLiteral("type"));
         if (!t.isEmpty() && !m_types.find(t))
             return tr("Type \"%1\" is not defined").arg(t);
+        if (m_nameCount.value(e.str(QStringLiteral("name"))) > 1)
+            return tr("Duplicate: there is more than one rule for this process (use \"Remove duplicates…\")");
         return QString();
     });
 
@@ -259,13 +261,23 @@ QWidget *MainWindow::buildRulesPane()
     auto *addProc = new QPushButton(tr("Add from running process…"));
     auto *edit = new QPushButton(tr("Edit…"));
     auto *del = new QPushButton(tr("Delete"));
+    auto *reorg = new QPushButton(tr("Reorganize into 99-rules/…"));
+    reorg->setToolTip(tr("Move every rule into %1/<type>.rules (rules without a type: custom.rules)")
+                          .arg(QDir(m_root).relativeFilePath(m_rulesDir)));
+    auto *dedup = new QPushButton(tr("Remove duplicates…"));
+    dedup->setToolTip(tr("Keep one rule per process name and delete the other copies"));
     btns->addWidget(add);
     btns->addWidget(addProc);
     btns->addWidget(edit);
     btns->addWidget(del);
+    btns->addSpacing(16);
+    btns->addWidget(reorg);
+    btns->addWidget(dedup);
     btns->addStretch(1);
-    btns->addWidget(new QLabel(tr("Double-click a rule to edit it · new rules go to %1")
-                                   .arg(QDir(m_root).relativeFilePath(m_newRulesFile))));
+    auto *hint = new QLabel(tr("Double-click a rule to edit it · new rules go to %1/<type>.rules")
+                                .arg(QDir(m_root).relativeFilePath(m_rulesDir)));
+    hint->setForegroundRole(QPalette::PlaceholderText);
+    btns->addWidget(hint);
     left->addLayout(btns);
     h->addLayout(left, 1);
 
@@ -278,6 +290,8 @@ QWidget *MainWindow::buildRulesPane()
     connect(add, &QPushButton::clicked, this, &MainWindow::addRule);
     connect(addProc, &QPushButton::clicked, this, &MainWindow::addRuleFromProcess);
     connect(edit, &QPushButton::clicked, this, &MainWindow::editRule);
+    connect(reorg, &QPushButton::clicked, this, &MainWindow::reorganizeRules);
+    connect(dedup, &QPushButton::clicked, this, &MainWindow::removeDuplicateRules);
     connect(m_showAllRules, &QPushButton::clicked, this, [this] {
         m_ruleFilter->clear();
         m_ruleTypeFilter->setCurrentIndex(0);
@@ -484,7 +498,9 @@ void MainWindow::updateDirtyState()
 void MainWindow::recomputeUsage()
 {
     m_usage.clear();
+    m_nameCount.clear();
     for (const auto &r : m_rules.entries()) {
+        m_nameCount[r->str(QStringLiteral("name"))]++;
         const QString t = r->str(QStringLiteral("type"));
         if (!t.isEmpty())
             m_usage[t]++;
@@ -570,8 +586,9 @@ bool MainWindow::saveAll(bool restart)
         writes.insert(it.key(), it.value());
     if (m_conf.dirty)
         writes.insert(m_conf.path, m_conf.render());
+    const QStringList deletes = m_types.pendingDeletes() + m_rules.pendingDeletes();
 
-    if (writes.isEmpty() && !restart) {
+    if (writes.isEmpty() && deletes.isEmpty() && !restart) {
         statusBar()->showMessage(tr("Nothing to save"), 5000);
         return true;
     }
@@ -579,7 +596,7 @@ bool MainWindow::saveAll(bool restart)
     QString log;
     setEnabled(false);
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    const bool ok = writeFiles(writes, restart, &log);
+    const bool ok = writeFiles(writes, deletes, restart, &log);
     QApplication::restoreOverrideCursor();
     setEnabled(true);
 
@@ -599,8 +616,10 @@ bool MainWindow::saveAll(bool restart)
     refreshConfTab();
     updateDirtyState();
 
-    QString msg = writes.isEmpty() ? tr("No changes to write.")
-                                   : tr("Saved %n file(s).", nullptr, writes.size());
+    QString msg = (writes.isEmpty() && deletes.isEmpty()) ? tr("No changes to write.")
+                                                          : tr("Saved %n file(s).", nullptr, writes.size());
+    if (!deletes.isEmpty())
+        msg += QLatin1Char(' ') + tr("Removed %n empty file(s) (kept as .bak).", nullptr, deletes.size());
     if (restart) {
         QString state;
         runProcess(QStringLiteral("systemctl"),
@@ -615,22 +634,29 @@ bool MainWindow::saveAll(bool restart)
     return true;
 }
 
-bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, bool restart, QString *log)
+bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, const QStringList &deletes, bool restart,
+                            QString *log)
 {
     const QString svc = m_service->currentText().trimmed();
     const bool isRoot = ::geteuid() == 0;
 
     bool direct = isRoot;
-    if (!direct && !writes.isEmpty()) {
+    if (!direct && !(writes.isEmpty() && deletes.isEmpty())) {
         direct = true;
         for (auto it = writes.begin(); it != writes.end(); ++it) {
             QFileInfo fi(it.key());
-            const bool writable = fi.exists() ? fi.isWritable() : QFileInfo(fi.absolutePath()).isWritable();
+            QString dir = fi.absolutePath();
+            while (!QFileInfo::exists(dir) && dir.size() > 1) // new sub-directory: check its parent
+                dir = QFileInfo(dir).absolutePath();
+            const bool writable = fi.exists() ? fi.isWritable() : QFileInfo(dir).isWritable();
             if (!writable) {
                 direct = false;
                 break;
             }
         }
+        for (const QString &p : deletes)
+            if (!QFileInfo(QFileInfo(p).absolutePath()).isWritable())
+                direct = false;
     }
 
     if (direct) {
@@ -644,6 +670,13 @@ bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, bool restar
             QSaveFile f(path);
             if (!f.open(QIODevice::WriteOnly) || f.write(it.value()) != it.value().size() || !f.commit()) {
                 *log = tr("Writing %1 failed: %2").arg(path, f.errorString());
+                return false;
+            }
+        }
+        for (const QString &path : deletes) { // "delete" = rename to .bak
+            QFile::remove(path + QStringLiteral(".bak"));
+            if (QFile::exists(path) && !QFile::rename(path, path + QStringLiteral(".bak"))) {
+                *log = tr("Removing %1 failed").arg(path);
                 return false;
             }
         }
@@ -681,6 +714,9 @@ bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, bool restar
         script += QStringLiteral("if [ -f %1 ]; then cp -f %1 %2; fi\n").arg(dest, bak);
         script += QStringLiteral("install -D -m 0644 %1 %2\n").arg(shellQuote(staged), dest);
     }
+    for (const QString &path : deletes) // "delete" = rename to .bak
+        script += QStringLiteral("if [ -f %1 ]; then mv -f %1 %2; fi\n")
+                      .arg(shellQuote(path), shellQuote(path + QStringLiteral(".bak")));
     if (restart)
         script += QStringLiteral("systemctl restart %1\n").arg(shellQuote(svc));
 
@@ -824,6 +860,7 @@ void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
                 for (const auto &r : refs) {
                     r->set(QStringLiteral("type"), newName);
                     m_rules.markModified(r);
+                    placeNewRule(r);
                 }
             }
         }
@@ -937,7 +974,11 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
                     original ? tr("Edit rule \"%1\"").arg(original->str(QStringLiteral("name"))) : tr("New rule"),
                     work, this);
     EntryEditor *ed = dlg.editor();
-    ed->setFileHint(tr("%1 (new)").arg(m_newRulesFile));
+    ed->setFileHintFn([this](const Entry &e) {
+        if (e.file && !e.originalLine.isEmpty())
+            return e.file->path; // saved rules stay where they are
+        return tr("%1 (new)").arg(ruleFileFor(e.str(QStringLiteral("type"))));
+    });
     ed->setTypeDescriber([this](const QString &t) { return describeType(t); });
     ed->setCgroupNames(m_cgroups.names());
     ed->setTypeNames(m_types.names());
@@ -966,7 +1007,7 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
 
     EntryPtr target = original;
     if (!original) {
-        target = m_rules.add(m_newRulesFile, work->str(QStringLiteral("name")));
+        target = m_rules.add(ruleFileFor(work->str(QStringLiteral("type"))), work->str(QStringLiteral("name")));
         target->fields = work->fields;
         m_ruleModel->reset();
     } else {
@@ -974,6 +1015,7 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
             return; // nothing changed
         original->fields = work->fields;
         m_rules.markModified(original);
+        placeNewRule(original);
         m_ruleModel->entryChanged(original);
     }
     recomputeUsage();
@@ -1131,4 +1173,117 @@ void MainWindow::updateRuleCount()
     m_ruleCount->setText(filtered ? tr("showing %1 of %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size())
                                   : tr("%1 rules").arg(m_rules.entries().size()));
     m_showAllRules->setEnabled(filtered);
+}
+
+// =====================================================================  rule file structure
+
+QString MainWindow::ruleFileFor(const QString &type) const
+{
+    QString base = QStringLiteral("custom");
+    if (!type.isEmpty()) {
+        base.clear();
+        for (const QChar c : type) // keep the name readable but safe as a file name
+            base += (c.isLetterOrNumber() || c == QLatin1Char('-') || c == QLatin1Char('_') || c == QLatin1Char('.'))
+                        ? c : QLatin1Char('_');
+        if (base.compare(QLatin1String("custom"), Qt::CaseInsensitive) == 0 || base.startsWith(QLatin1Char('.')))
+            base.prepend(QStringLiteral("type-")); // custom.rules is reserved for rules without a type
+    }
+    return m_rulesDir + QLatin1Char('/') + base + QStringLiteral(".rules");
+}
+
+void MainWindow::placeNewRule(const EntryPtr &e)
+{
+    if (e && e->originalLine.isEmpty()) // never saved -> follows its type
+        m_rules.moveTo(e, ruleFileFor(e->str(QStringLiteral("type"))));
+}
+
+void MainWindow::reorganizeRules()
+{
+    QVector<EntryPtr> toMove;
+    QSet<ConfFile *> sources;
+    QSet<QString> targets;
+    for (const auto &r : m_rules.entries()) {
+        const QString target = ruleFileFor(r->str(QStringLiteral("type")));
+        if (!r->file || QDir::cleanPath(r->file->path) != QDir::cleanPath(target)) {
+            targets.insert(target);
+            toMove << r;
+            if (r->file)
+                sources.insert(r->file);
+        }
+    }
+    if (toMove.isEmpty()) {
+        QMessageBox::information(this, tr("Reorganize rules"),
+                                 tr("All rules are already in %1.").arg(m_rulesDir));
+        return;
+    }
+    // files that will have no rules left afterwards
+    int emptied = 0;
+    for (ConfFile *f : sources) {
+        int left = 0;
+        for (const ConfLine &l : f->lines)
+            if (l.entry && !toMove.contains(l.entry))
+                ++left;
+        if (left == 0 && f->existed)
+            ++emptied;
+    }
+    const QString q = tr("Move %1 rules into %2/<type>.rules?\n\n"
+                         "Rules without a type go to custom.rules. This creates or updates %3 files in %2, "
+                         "and %4 old files that end up with no rules are removed (kept as .bak).\n\n"
+                         "Nothing is written until you press Save.")
+                          .arg(toMove.size()).arg(m_rulesDir).arg(targets.size()).arg(emptied);
+    if (QMessageBox::question(this, tr("Reorganize rules"), q) != QMessageBox::Yes)
+        return;
+
+    for (const auto &r : toMove)
+        m_rules.moveTo(r, ruleFileFor(r->str(QStringLiteral("type"))));
+    m_ruleModel->reset();
+    recomputeUsage();
+    updateDirtyState();
+    statusBar()->showMessage(tr("Moved %1 rules into %2. Press Save to write the changes.")
+                                 .arg(toMove.size()).arg(m_rulesDir), 10000);
+}
+
+void MainWindow::removeDuplicateRules()
+{
+    // Keep the copy that is loaded last (files load in alphabetical order, so a rule in
+    // 99-rules wins over one in 00-default; within a file the lower line wins).
+    QHash<QString, EntryPtr> keep;
+    for (const auto &r : m_rules.entries())
+        keep[r->str(QStringLiteral("name"))] = r;
+    QVector<EntryPtr> drop;
+    QStringList preview;
+    for (const auto &r : m_rules.entries()) {
+        const QString n = r->str(QStringLiteral("name"));
+        if (keep.value(n) == r)
+            continue;
+        drop << r;
+        if (preview.size() < 15) {
+            const EntryPtr k = keep.value(n);
+            preview << tr("%1: keep %2 (%3), remove %4")
+                           .arg(n, k->file ? m_ruleModel->relPath(k->file->path) : QString(),
+                                k->str(QStringLiteral("type")).isEmpty() ? tr("no type") : k->str(QStringLiteral("type")),
+                                r->file ? m_ruleModel->relPath(r->file->path) : QString());
+        }
+    }
+    if (drop.isEmpty()) {
+        QMessageBox::information(this, tr("Remove duplicates"), tr("There are no duplicate rules."));
+        return;
+    }
+    QString q = tr("%n duplicate rule(s) will be removed. For each process the copy in the file that sorts "
+                   "last is kept, so a rule in 99-rules wins over one in 00-default:", nullptr, drop.size())
+                + QStringLiteral("\n\n") + preview.join(QLatin1Char('\n'));
+    if (drop.size() > preview.size())
+        q += QStringLiteral("\n…");
+    q += QStringLiteral("\n\n") + tr("Nothing is written until you press Save.");
+    if (QMessageBox::question(this, tr("Remove duplicates"), q) != QMessageBox::Yes)
+        return;
+
+    for (const auto &r : drop)
+        m_rules.remove(r);
+    m_ruleModel->reset();
+    recomputeUsage();
+    m_typeModel->allChanged();
+    updateDirtyState();
+    statusBar()->showMessage(tr("Removed %n duplicate rule(s). Press Save to write the changes.", nullptr, drop.size()),
+                             10000);
 }

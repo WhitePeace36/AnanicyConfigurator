@@ -7,8 +7,8 @@ A GUI editor for [Ananicy](https://github.com/Nefelim4ag/Ananicy) and ananicy-cp
 - **Types & Rules tab**
   - Table of all types (from every `*.types` file) showing their settings and how many rules use them.
     **Show its rules** filters the rules list by the selected type; **Show all rules** clears the filter.
-  - Table of all rules (every `*.rules` file under the config dir, including all of `00-default/**`),
-    with search and a type filter.
+  - Table of all rules (every `*.rules` file under the config dir, including `00-default/**` and
+    `99-rules/`), with search and a type filter.
   - Double-click an entry (or select it and press **Edit…** / Enter) to edit it in a pop-up dialog;
     **Add…** opens the same dialog for a new entry. Changes are only applied when you press OK.
   - In the type dialog, every setting except the name is a drop-down: `nice`, `latency_nice`,
@@ -28,15 +28,29 @@ A GUI editor for [Ananicy](https://github.com/Nefelim4ag/Ananicy) and ananicy-cp
 
 | What | File |
 |---|---|
-| Changed existing rule | the same file it was loaded from (only that line changes) |
-| New rule | `/etc/ananicy.d/00-default/custom.rules` |
+| Changed existing rule | the same file it was loaded from (only that line changes), even if its type changes |
+| New rule with a type | `/etc/ananicy.d/99-rules/<type>.rules`, e.g. `99-rules/game.rules` |
+| New rule without a type | `/etc/ananicy.d/99-rules/custom.rules` |
 | Changed existing type | the same file it was loaded from |
 | New type | `/etc/ananicy.d/00-types.types` |
 | ananicy.conf settings | `/etc/ananicy.d/ananicy.conf` |
 
+A new rule follows its type until it is saved: if you change its type before saving, it moves to
+the matching file. Characters that aren't safe in a file name become `_` (type `a,b` →
+`a_b.rules`). A type named `custom` uses `type-custom.rules`, because `custom.rules` is reserved
+for rules without a type.
+
+**Reorganize into 99-rules/…** moves every rule into this structure. **Remove duplicates…**
+keeps one rule per process name and deletes the other copies. For each name it keeps the copy in
+the file that sorts last, so a rule in `99-rules` wins over one in `00-default`. Rules that are
+duplicates are shown in red until you remove them. Neither button writes anything until you
+press Save.
+
 Comments, blank lines, formatting of untouched lines and unknown keys are preserved byte-for-byte.
 Only files that actually changed are written. Before each save, the previous version is copied to
-`<file>.bak`. Ananicy only loads `*.rules` / `*.types`, so it ignores these backups.
+`<file>.bak`. A file that ends up with no rules (for example after reorganizing) is not deleted
+but renamed to `<file>.bak`. Ananicy only loads `*.rules` / `*.types`, so it ignores these
+backups.
 
 ## Root permissions
 
