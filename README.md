@@ -64,6 +64,23 @@ cp -r /etc/ananicy.d /tmp/ananicy-test
 ./build/ananicy-gui --root /tmp/ananicy-test
 ```
 
+## Arch Linux package
+
+The `PKGBUILD` in the project root builds the package from this checkout. Nothing is downloaded,
+and your local changes are included:
+
+```bash
+cd AnanicyConfigurator
+makepkg -si
+```
+
+The build files go to `build/`, and the finished package (`ananicy-configurator-*.pkg.tar.zst`)
+is written to the project root. The package installs `/usr/bin/ananicy-gui` and a desktop entry
+("Ananicy Configurator").
+
+To rebuild after changing or pulling the code, run `makepkg -sif`. To uninstall, run
+`sudo pacman -R ananicy-configurator`.
+
 ## Notes
 
 - Ananicy matches rules against the kernel process name (`/proc/PID/comm`), which the kernel cuts
