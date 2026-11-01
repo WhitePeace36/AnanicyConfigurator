@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 
+#include "columnfitter.h"
+#include "entrydialog.h"
 #include "entryeditor.h"
 #include "entrymodel.h"
 #include "processdialog.h"
@@ -16,6 +18,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonValue>
 #include <QRegularExpressionValidator>
 #include <QSet>
 #include <QItemSelectionModel>
@@ -161,39 +164,34 @@ QWidget *MainWindow::buildTypesPane()
     m_typeView = makeTable();
     m_typeView->setSelectionMode(QAbstractItemView::SingleSelection);
     m_typeView->setModel(m_typeProxy);
+    new ColumnFitter(m_typeView);
     m_typeView->sortByColumn(0, Qt::AscendingOrder);
     left->addWidget(m_typeView, 1);
 
     auto *btns = new QHBoxLayout;
     auto *add = new QPushButton(tr("Add type…"));
+    auto *edit = new QPushButton(tr("Edit…"));
     auto *dup = new QPushButton(tr("Duplicate…"));
     auto *del = new QPushButton(tr("Delete"));
+    auto *show = new QPushButton(tr("Show its rules"));
+    show->setToolTip(tr("Filter the rules list below by the selected type"));
     btns->addWidget(add);
+    btns->addWidget(edit);
     btns->addWidget(dup);
     btns->addWidget(del);
+    btns->addWidget(show);
     btns->addStretch(1);
+    btns->addWidget(new QLabel(tr("Double-click a type to edit it")));
     left->addLayout(btns);
-    h->addLayout(left, 3);
-
-    // right: editor
-    m_typeEditor = new EntryEditor(EntryEditor::TypeMode);
-    h->addWidget(m_typeEditor, 2);
+    h->addLayout(left, 1);
 
     connect(m_typeFilter, &QLineEdit::textChanged, m_typeProxy, &EntryFilterProxy::setText);
     connect(add, &QPushButton::clicked, this, &MainWindow::addType);
+    connect(edit, &QPushButton::clicked, this, &MainWindow::editType);
     connect(dup, &QPushButton::clicked, this, &MainWindow::duplicateType);
     connect(del, &QPushButton::clicked, this, &MainWindow::deleteType);
-    connect(m_typeView->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
-            [this] { m_typeEditor->setEntry(currentType()); });
-    connect(m_typeView, &QTableView::doubleClicked, this, [this] {
-        if (EntryPtr t = currentType()) {
-            int i = m_ruleTypeFilter->findText(t->str(QStringLiteral("type")));
-            if (i >= 0)
-                m_ruleTypeFilter->setCurrentIndex(i);
-        }
-    });
-    connect(m_typeEditor, &EntryEditor::fieldChanged, this, &MainWindow::onTypeFieldChanged);
-    connect(m_typeEditor, &EntryEditor::renameRequested, this, &MainWindow::onTypeRename);
+    connect(show, &QPushButton::clicked, this, &MainWindow::showRulesOfType);
+    connect(m_typeView, &QTableView::activated, this, &MainWindow::editType); // double-click / Enter
     auto *sc = new QShortcut(QKeySequence::Delete, m_typeView);
     sc->setContext(Qt::WidgetShortcut);
     connect(sc, &QShortcut::activated, this, &MainWindow::deleteType);
@@ -217,6 +215,9 @@ QWidget *MainWindow::buildRulesPane()
     filterRow->addWidget(new QLabel(tr("Type:")));
     filterRow->addWidget(m_ruleTypeFilter);
     filterRow->addWidget(m_ruleCount);
+    m_showAllRules = new QPushButton(tr("Show all rules"));
+    m_showAllRules->setToolTip(tr("Clear the text and type filters"));
+    filterRow->addWidget(m_showAllRules);
     left->addLayout(filterRow);
 
     m_ruleModel = new EntryModel(&m_rules, m_root, this);
@@ -249,38 +250,40 @@ QWidget *MainWindow::buildRulesPane()
     m_ruleView = makeTable();
     m_ruleView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ruleView->setModel(m_ruleProxy);
+    new ColumnFitter(m_ruleView);
     m_ruleView->sortByColumn(RColName, Qt::AscendingOrder);
     left->addWidget(m_ruleView, 1);
 
     auto *btns = new QHBoxLayout;
     auto *add = new QPushButton(tr("Add rule…"));
     auto *addProc = new QPushButton(tr("Add from running process…"));
+    auto *edit = new QPushButton(tr("Edit…"));
     auto *del = new QPushButton(tr("Delete"));
     btns->addWidget(add);
     btns->addWidget(addProc);
+    btns->addWidget(edit);
     btns->addWidget(del);
     btns->addStretch(1);
-    btns->addWidget(new QLabel(tr("New rules go to %1").arg(QDir(m_root).relativeFilePath(m_newRulesFile))));
+    btns->addWidget(new QLabel(tr("Double-click a rule to edit it · new rules go to %1")
+                                   .arg(QDir(m_root).relativeFilePath(m_newRulesFile))));
     left->addLayout(btns);
-    h->addLayout(left, 3);
-
-    m_ruleEditor = new EntryEditor(EntryEditor::RuleMode);
-    m_ruleEditor->setTypeDescriber([this](const QString &t) { return describeType(t); });
-    h->addWidget(m_ruleEditor, 2);
+    h->addLayout(left, 1);
 
     connect(m_ruleFilter, &QLineEdit::textChanged, this, [this](const QString &t) {
         m_ruleProxy->setText(t);
-        m_ruleCount->setText(tr("%1 / %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size()));
+        updateRuleCount();
     });
     connect(m_ruleTypeFilter, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             &MainWindow::applyRuleTypeFilter);
     connect(add, &QPushButton::clicked, this, &MainWindow::addRule);
     connect(addProc, &QPushButton::clicked, this, &MainWindow::addRuleFromProcess);
+    connect(edit, &QPushButton::clicked, this, &MainWindow::editRule);
+    connect(m_showAllRules, &QPushButton::clicked, this, [this] {
+        m_ruleFilter->clear();
+        m_ruleTypeFilter->setCurrentIndex(0);
+    });
     connect(del, &QPushButton::clicked, this, &MainWindow::deleteRules);
-    connect(m_ruleView->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
-            [this] { m_ruleEditor->setEntry(currentRule()); });
-    connect(m_ruleEditor, &EntryEditor::fieldChanged, this, &MainWindow::onRuleFieldChanged);
-    connect(m_ruleEditor, &EntryEditor::renameRequested, this, &MainWindow::onRuleRename);
+    connect(m_ruleView, &QTableView::activated, this, &MainWindow::editRule); // double-click / Enter
     auto *sc = new QShortcut(QKeySequence::Delete, m_ruleView);
     sc->setContext(Qt::WidgetShortcut);
     connect(sc, &QShortcut::activated, this, &MainWindow::deleteRules);
@@ -413,9 +416,6 @@ QWidget *MainWindow::buildBottomBar()
 
 void MainWindow::loadAll()
 {
-    m_typeEditor->setEntry(nullptr);
-    m_ruleEditor->setEntry(nullptr);
-
     m_types.clear();
     m_rules.clear();
     m_cgroups.clear();
@@ -428,12 +428,7 @@ void MainWindow::loadAll()
     recomputeUsage();
     m_typeModel->reset();
     m_ruleModel->reset();
-    m_typeView->resizeColumnsToContents();
-    m_ruleView->resizeColumnsToContents();
-    m_ruleView->setColumnWidth(RColName, qMax(m_ruleView->columnWidth(RColName), 220));
 
-    m_ruleEditor->setCgroupNames(m_cgroups.names());
-    m_typeEditor->setCgroupNames(m_cgroups.names());
     typeNamesChanged();
     refreshConfTab();
 
@@ -483,7 +478,7 @@ bool MainWindow::isDirty() const
 void MainWindow::updateDirtyState()
 {
     setWindowTitle(tr("Ananicy Configurator — %1%2").arg(m_root, isDirty() ? QStringLiteral(" *") : QString()));
-    m_ruleCount->setText(tr("%1 / %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size()));
+    updateRuleCount();
 }
 
 void MainWindow::recomputeUsage()
@@ -499,7 +494,6 @@ void MainWindow::recomputeUsage()
 void MainWindow::typeNamesChanged()
 {
     const QStringList names = m_types.names();
-    m_ruleEditor->setTypeNames(names);
     refreshRuleTypeFilter();
 }
 
@@ -540,10 +534,6 @@ QString MainWindow::detectService() const
 
 bool MainWindow::saveAll(bool restart)
 {
-    // apply pending name edits
-    m_typeEditor->commitPrimary();
-    m_ruleEditor->commitPrimary();
-
     // validation
     QStringList errors;
     QSet<QString> seen;
@@ -708,8 +698,6 @@ bool MainWindow::writeFiles(const QMap<QString, QByteArray> &writes, bool restar
 
 void MainWindow::closeEvent(QCloseEvent *ev)
 {
-    m_typeEditor->commitPrimary();
-    m_ruleEditor->commitPrimary();
     if (!isDirty()) {
         ev->accept();
         return;
@@ -747,49 +735,104 @@ void MainWindow::selectType(const EntryPtr &e)
 
 void MainWindow::addType()
 {
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, tr("Add type"), tr("Name of the new type:"),
-                                               QLineEdit::Normal, QString(), &ok).trimmed();
-    if (!ok || name.isEmpty())
-        return;
-    if (EntryPtr ex = m_types.find(name)) {
-        QMessageBox::information(this, tr("Add type"), tr("Type \"%1\" already exists.").arg(name));
-        selectType(ex);
-        return;
-    }
-    m_typeEditor->setEntry(nullptr);
-    EntryPtr e = m_types.add(m_newTypesFile, name);
-    m_typeFilter->clear();
-    m_typeModel->reset();
-    typeNamesChanged();
-    selectType(e);
-    updateDirtyState();
+    openTypeDialog(nullptr, nullptr);
+}
+
+void MainWindow::editType()
+{
+    if (EntryPtr t = currentType())
+        openTypeDialog(t, nullptr);
 }
 
 void MainWindow::duplicateType()
 {
-    EntryPtr src = currentType();
-    if (!src)
-        return;
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, tr("Duplicate type"), tr("Name of the copy:"), QLineEdit::Normal,
-                                               src->str(QStringLiteral("type")) + QStringLiteral("-copy"), &ok)
-                             .trimmed();
-    if (!ok || name.isEmpty())
-        return;
-    if (m_types.find(name)) {
-        QMessageBox::warning(this, tr("Duplicate type"), tr("Type \"%1\" already exists.").arg(name));
-        return;
+    if (EntryPtr t = currentType())
+        openTypeDialog(nullptr, t);
+}
+
+void MainWindow::showRulesOfType()
+{
+    if (EntryPtr t = currentType()) {
+        int i = m_ruleTypeFilter->findText(t->str(QStringLiteral("type")));
+        if (i >= 0)
+            m_ruleTypeFilter->setCurrentIndex(i);
     }
-    m_typeEditor->setEntry(nullptr);
-    EntryPtr e = m_types.add(m_newTypesFile, name);
-    for (const auto &f : src->fields)
-        if (f.first != QLatin1String("type"))
-            e->set(f.first, f.second);
-    m_typeFilter->clear();
-    m_typeModel->reset();
+}
+
+void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
+{
+    // work on a copy; nothing changes unless the user presses OK
+    auto work = std::make_shared<Entry>(original ? *original : templ ? *templ : Entry());
+    if (!original) {
+        work->file = nullptr;
+        work->originalLine.clear();
+        work->trailing.clear();
+        work->modified = false;
+        work->set(QStringLiteral("type"), templ ? QJsonValue(templ->str(QStringLiteral("type")) + QStringLiteral("-copy"))
+                                                : QJsonValue(QJsonValue::Undefined));
+    }
+
+    EntryDialog dlg(EntryEditor::TypeMode,
+                    original ? tr("Edit type \"%1\"").arg(original->str(QStringLiteral("type")))
+                             : templ ? tr("Duplicate type \"%1\"").arg(templ->str(QStringLiteral("type")))
+                                     : tr("New type"),
+                    work, this);
+    dlg.editor()->setFileHint(tr("%1 (new)").arg(m_newTypesFile));
+    dlg.editor()->setCgroupNames(m_cgroups.names());
+    dlg.setValidator([this, original](const Entry &e, QWidget *parent) {
+        const QString n = e.str(QStringLiteral("type"));
+        if (n.isEmpty()) {
+            QMessageBox::warning(parent, tr("Type"), tr("The type name cannot be empty."));
+            return false;
+        }
+        EntryPtr other = m_types.find(n);
+        if (other && other != original) {
+            QMessageBox::warning(parent, tr("Type"), tr("Type \"%1\" already exists.").arg(n));
+            return false;
+        }
+        return true;
+    });
+    dlg.editor()->focusPrimary();
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QString newName = work->str(QStringLiteral("type"));
+    EntryPtr target = original;
+    if (!original) {
+        target = m_types.add(m_newTypesFile, newName);
+        target->fields = work->fields;
+        m_typeFilter->clear();
+        m_typeModel->reset();
+    } else {
+        if (original->fields == work->fields)
+            return; // nothing changed
+        const QString oldName = original->str(QStringLiteral("type"));
+        original->fields = work->fields;
+        m_types.markModified(original);
+        m_typeModel->entryChanged(original);
+
+        if (oldName != newName && !m_types.find(oldName)) {
+            QVector<EntryPtr> refs;
+            for (const auto &r : m_rules.entries())
+                if (r->str(QStringLiteral("type")) == oldName)
+                    refs << r;
+            if (!refs.isEmpty()
+                && QMessageBox::question(this, tr("Rename type"),
+                                         tr("%n rule(s) use \"%1\". Change them to \"%2\" as well?", nullptr,
+                                            refs.size()).arg(oldName, newName))
+                       == QMessageBox::Yes) {
+                for (const auto &r : refs) {
+                    r->set(QStringLiteral("type"), newName);
+                    m_rules.markModified(r);
+                }
+            }
+        }
+    }
+    recomputeUsage();
     typeNamesChanged();
-    selectType(e);
+    m_typeModel->allChanged();
+    m_ruleModel->allChanged();
+    selectType(target);
     updateDirtyState();
 }
 
@@ -806,60 +849,12 @@ void MainWindow::deleteType()
     if (QMessageBox::question(this, tr("Delete type"), q) != QMessageBox::Yes)
         return;
     const int row = m_typeView->currentIndex().row();
-    m_typeEditor->setEntry(nullptr);
     m_types.remove(e);
     m_typeModel->reset();
     typeNamesChanged();
     m_ruleModel->allChanged();
     if (m_typeProxy->rowCount() > 0)
         m_typeView->setCurrentIndex(m_typeProxy->index(qMin(row, m_typeProxy->rowCount() - 1), 0));
-    updateDirtyState();
-}
-
-void MainWindow::onTypeRename(const EntryPtr &e, const QString &oldName, const QString &newName)
-{
-    if (newName.isEmpty()) {
-        QMessageBox::warning(this, tr("Rename type"), tr("The type name cannot be empty."));
-        m_typeEditor->refresh();
-        return;
-    }
-    EntryPtr other = m_types.find(newName);
-    if (other && other != e) {
-        QMessageBox::warning(this, tr("Rename type"), tr("Type \"%1\" already exists.").arg(newName));
-        m_typeEditor->refresh();
-        return;
-    }
-    e->set(QStringLiteral("type"), newName);
-    m_types.markModified(e);
-    m_typeModel->entryChanged(e);
-
-    QVector<EntryPtr> refs;
-    for (const auto &r : m_rules.entries())
-        if (r->str(QStringLiteral("type")) == oldName)
-            refs << r;
-    if (!refs.isEmpty() && !m_types.find(oldName)
-        && QMessageBox::question(this, tr("Rename type"),
-                                 tr("%n rule(s) use \"%1\". Change them to \"%2\" as well?", nullptr, refs.size())
-                                     .arg(oldName, newName))
-               == QMessageBox::Yes) {
-        for (const auto &r : refs) {
-            r->set(QStringLiteral("type"), newName);
-            m_rules.markModified(r);
-        }
-    }
-    recomputeUsage();
-    typeNamesChanged();
-    m_typeModel->allChanged();
-    m_ruleModel->allChanged();
-    m_ruleEditor->refresh();
-    updateDirtyState();
-}
-
-void MainWindow::onTypeFieldChanged(const EntryPtr &e, const QString &)
-{
-    m_types.markModified(e);
-    m_typeModel->entryChanged(e);
-    m_ruleEditor->refresh(); // updates the "Type settings" hint
     updateDirtyState();
 }
 
@@ -891,11 +886,13 @@ void MainWindow::selectRule(const EntryPtr &e)
 
 void MainWindow::addRule()
 {
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, tr("Add rule"), tr("Process name (as in /proc/PID/comm):"),
-                                               QLineEdit::Normal, QString(), &ok).trimmed();
-    if (ok && !name.isEmpty())
-        createRule(name);
+    openRuleDialog(nullptr, QString());
+}
+
+void MainWindow::editRule()
+{
+    if (EntryPtr r = currentRule())
+        openRuleDialog(r, QString());
 }
 
 void MainWindow::addRuleFromProcess()
@@ -923,15 +920,66 @@ void MainWindow::createRule(const QString &name)
             return;
         if (r == QMessageBox::Yes) {
             selectRule(ex);
-            m_ruleEditor->focusType();
+            openRuleDialog(ex, QString());
             return;
         }
     }
-    m_ruleEditor->setEntry(nullptr);
-    EntryPtr e = m_rules.add(m_newRulesFile, name);
-    m_ruleModel->reset();
-    selectRule(e);
-    m_ruleEditor->focusType();
+    openRuleDialog(nullptr, name);
+}
+
+void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName)
+{
+    auto work = std::make_shared<Entry>(original ? *original : Entry());
+    if (!original && !newName.isEmpty())
+        work->set(QStringLiteral("name"), newName);
+
+    EntryDialog dlg(EntryEditor::RuleMode,
+                    original ? tr("Edit rule \"%1\"").arg(original->str(QStringLiteral("name"))) : tr("New rule"),
+                    work, this);
+    EntryEditor *ed = dlg.editor();
+    ed->setFileHint(tr("%1 (new)").arg(m_newRulesFile));
+    ed->setTypeDescriber([this](const QString &t) { return describeType(t); });
+    ed->setCgroupNames(m_cgroups.names());
+    ed->setTypeNames(m_types.names());
+    dlg.setValidator([this, original](const Entry &e, QWidget *parent) {
+        const QString n = e.str(QStringLiteral("name"));
+        if (n.isEmpty()) {
+            QMessageBox::warning(parent, tr("Rule"), tr("The process name cannot be empty."));
+            return false;
+        }
+        const bool renamed = !original || original->str(QStringLiteral("name")) != n;
+        EntryPtr other = m_rules.find(n);
+        if (renamed && other && other != original)
+            return QMessageBox::question(parent, tr("Rule"),
+                                         tr("Another rule for \"%1\" already exists in %2.\n"
+                                            "Ananicy will use whichever is loaded last. Continue?")
+                                             .arg(n, other->file ? other->file->path : QString()))
+                == QMessageBox::Yes;
+        return true;
+    });
+    if (newName.isEmpty() && !original)
+        ed->focusPrimary();
+    else
+        ed->focusType();
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    EntryPtr target = original;
+    if (!original) {
+        target = m_rules.add(m_newRulesFile, work->str(QStringLiteral("name")));
+        target->fields = work->fields;
+        m_ruleModel->reset();
+    } else {
+        if (original->fields == work->fields)
+            return; // nothing changed
+        original->fields = work->fields;
+        m_rules.markModified(original);
+        m_ruleModel->entryChanged(original);
+    }
+    recomputeUsage();
+    m_typeModel->allChanged();
+    refreshRuleTypeFilter();
+    selectRule(target);
     updateDirtyState();
 }
 
@@ -953,7 +1001,6 @@ void MainWindow::deleteRules()
     if (QMessageBox::question(this, tr("Delete rules"), q) != QMessageBox::Yes)
         return;
     const int row = m_ruleView->currentIndex().row();
-    m_ruleEditor->setEntry(nullptr);
     for (const auto &e : sel)
         m_rules.remove(e);
     m_ruleModel->reset();
@@ -961,40 +1008,6 @@ void MainWindow::deleteRules()
     m_typeModel->allChanged();
     if (m_ruleProxy->rowCount() > 0)
         m_ruleView->setCurrentIndex(m_ruleProxy->index(qMin(row, m_ruleProxy->rowCount() - 1), 0));
-    updateDirtyState();
-}
-
-void MainWindow::onRuleRename(const EntryPtr &e, const QString &, const QString &newName)
-{
-    if (newName.isEmpty()) {
-        QMessageBox::warning(this, tr("Rename rule"), tr("The process name cannot be empty."));
-        m_ruleEditor->refresh();
-        return;
-    }
-    EntryPtr other = m_rules.find(newName);
-    if (other && other != e
-        && QMessageBox::question(this, tr("Rename rule"),
-                                 tr("Another rule for \"%1\" already exists in %2.\n"
-                                    "Ananicy will use whichever is loaded last. Continue?")
-                                     .arg(newName, other->file ? other->file->path : QString()))
-               != QMessageBox::Yes) {
-        m_ruleEditor->refresh();
-        return;
-    }
-    e->set(QStringLiteral("name"), newName);
-    m_rules.markModified(e);
-    m_ruleModel->entryChanged(e);
-    updateDirtyState();
-}
-
-void MainWindow::onRuleFieldChanged(const EntryPtr &e, const QString &key)
-{
-    m_rules.markModified(e);
-    m_ruleModel->entryChanged(e);
-    if (key == QLatin1String("type")) {
-        recomputeUsage();
-        m_typeModel->allChanged();
-    }
     updateDirtyState();
 }
 
@@ -1027,8 +1040,7 @@ void MainWindow::applyRuleTypeFilter()
         m_ruleProxy->setExact(RColType, QString());
     else
         m_ruleProxy->setExact(RColType, m_ruleTypeFilter->currentText());
-    if (m_ruleCount)
-        m_ruleCount->setText(tr("%1 / %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size()));
+    updateRuleCount();
 }
 
 // =====================================================================  ananicy.conf
@@ -1109,4 +1121,14 @@ void MainWindow::removeConfKey()
     m_conf.unset(m_confOther->item(r, 0)->text());
     refreshConfTab();
     updateDirtyState();
+}
+
+void MainWindow::updateRuleCount()
+{
+    if (!m_ruleCount || !m_showAllRules)
+        return;
+    const bool filtered = !m_ruleFilter->text().trimmed().isEmpty() || m_ruleTypeFilter->currentIndex() > 0;
+    m_ruleCount->setText(filtered ? tr("showing %1 of %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size())
+                                  : tr("%1 rules").arg(m_rules.entries().size()));
+    m_showAllRules->setEnabled(filtered);
 }

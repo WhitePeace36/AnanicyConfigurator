@@ -15,8 +15,13 @@ add_executable(ananicy-gui
     src/fieldspecs.h
     src/entrymodel.h
     src/entrymodel.cpp
+    src/elidedlabel.h
     src/entryeditor.h
     src/entryeditor.cpp
+    src/entrydialog.h
+    src/entrydialog.cpp
+    src/columnfitter.h
+    src/columnfitter.cpp
     src/processdialog.h
     src/processdialog.cpp
     src/mainwindow.h

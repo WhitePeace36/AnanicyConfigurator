@@ -49,22 +49,24 @@ private:
     EntryPtr currentType() const;
     void selectType(const EntryPtr &e);
     void addType();
+    void editType();
     void duplicateType();
     void deleteType();
-    void onTypeRename(const EntryPtr &e, const QString &oldName, const QString &newName);
-    void onTypeFieldChanged(const EntryPtr &e, const QString &key);
+    void showRulesOfType();
+    void openTypeDialog(const EntryPtr &original, const EntryPtr &templ);
 
     // rules
     EntryPtr currentRule() const;
     void selectRule(const EntryPtr &e);
     void addRule();
     void addRuleFromProcess();
+    void editRule();
     void createRule(const QString &name);
     void deleteRules();
-    void onRuleRename(const EntryPtr &e, const QString &oldName, const QString &newName);
-    void onRuleFieldChanged(const EntryPtr &e, const QString &key);
+    void openRuleDialog(const EntryPtr &original, const QString &newName);
     void refreshRuleTypeFilter();
     void applyRuleTypeFilter();
+    void updateRuleCount();
 
     // ananicy.conf
     void refreshConfTab();
@@ -87,12 +89,11 @@ private:
     EntryFilterProxy *m_ruleProxy = nullptr;
     QTableView *m_typeView = nullptr;
     QTableView *m_ruleView = nullptr;
-    EntryEditor *m_typeEditor = nullptr;
-    EntryEditor *m_ruleEditor = nullptr;
     QLineEdit *m_typeFilter = nullptr;
     QLineEdit *m_ruleFilter = nullptr;
     QComboBox *m_ruleTypeFilter = nullptr;
     QLabel *m_ruleCount = nullptr;
+    QPushButton *m_showAllRules = nullptr;
 
     QVector<QPair<ConfSpec, QComboBox *>> m_confCombos;
     QTableWidget *m_confOther = nullptr;

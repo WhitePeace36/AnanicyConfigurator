@@ -1,5 +1,8 @@
 #include "entryeditor.h"
 
+#include "elidedlabel.h"
+
+#include <QAction>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -8,6 +11,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QRegularExpressionValidator>
+#include <QStyle>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 static const char *kUnset = "(unset)";
@@ -20,41 +25,55 @@ EntryEditor::EntryEditor(Mode mode, QWidget *parent)
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
+    // Fixed layout: every row is always present and one line high, so nothing
+    // moves when the selected type (and with it the info text) changes.
     auto *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_name = new QLineEdit;
     m_name->setPlaceholderText(mode == TypeMode ? tr("Type name, e.g. Game") : tr("Process name, e.g. wine"));
+    // warning icon inside the line edit instead of an extra row
+    m_nameHint = m_name->addAction(style()->standardIcon(QStyle::SP_MessageBoxWarning), QLineEdit::TrailingPosition);
+    m_nameHint->setToolTip(tr("The kernel truncates process names (/proc/PID/comm) to 15 characters, "
+                              "so a longer name may never match."));
+    m_nameHint->setVisible(false);
     form->addRow(mode == TypeMode ? tr("Type name:") : tr("Process name:"), m_name);
-    m_nameHint = new QLabel;
-    m_nameHint->setWordWrap(true);
-    m_nameHint->setStyleSheet(QStringLiteral("color: #b06000;"));
-    m_nameHint->hide();
-    form->addRow(QString(), m_nameHint);
 
     if (mode == RuleMode) {
         m_type = new QComboBox;
+        m_type->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         m_type->setToolTip(tr("Type from the types list whose settings are applied to this process"));
         form->addRow(tr("Type:"), m_type);
-        m_typeInfo = new QLabel;
-        m_typeInfo->setWordWrap(true);
-        m_typeInfo->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        m_typeInfo = new ElidedLabel(Qt::ElideRight);
         form->addRow(QString(), m_typeInfo);
         connect(m_type, &QComboBox::currentTextChanged, this, [this] { onTypeChanged(); });
     }
-    m_fileLabel = new QLabel;
-    m_fileLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_fileLabel->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    m_fileLabel = new ElidedLabel(Qt::ElideMiddle);
     form->addRow(tr("File:"), m_fileLabel);
     outer->addLayout(form);
 
+    if (mode == RuleMode) {
+        m_overridesToggle = new QToolButton;
+        m_overridesToggle->setCheckable(true);
+        m_overridesToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        m_overridesToggle->setArrowType(Qt::RightArrow);
+        m_overridesToggle->setAutoRaise(true);
+        m_overridesToggle->setToolTip(tr("Per-rule settings that take precedence over the type"));
+        outer->addWidget(m_overridesToggle);
+        connect(m_overridesToggle, &QToolButton::toggled, this, &EntryEditor::setOverridesVisible);
+    }
+
     m_fieldsBox = new QGroupBox(mode == TypeMode ? tr("Settings")
-                                                 : tr("Overrides (optional, take precedence over the type)"));
+                                                 : tr("Overrides (take precedence over the type)"));
     auto *grid = new QGridLayout(m_fieldsBox);
     int i = 0;
     for (const FieldSpec &s : typeFieldSpecs()) {
         auto *c = new QComboBox;
         c->setEditable(s.editable);
         c->setToolTip(s.tip);
-        c->setMinimumContentsLength(10);
+        c->setMinimumContentsLength(6);
+        c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         if (s.editable) {
             c->setInsertPolicy(QComboBox::NoInsert);
             c->lineEdit()->setPlaceholderText(QString::fromLatin1(kUnset));
@@ -73,17 +92,22 @@ EntryEditor::EntryEditor(Mode mode, QWidget *parent)
     }
     outer->addWidget(m_fieldsBox);
     outer->addStretch(1);
+    if (mode == RuleMode)
+        m_fieldsBox->hide();
 
-    connect(m_name, &QLineEdit::editingFinished, this, &EntryEditor::commitPrimary);
-    connect(m_name, &QLineEdit::textEdited, this, [this] { updateHints(); });
+    connect(m_name, &QLineEdit::textEdited, this, [this](const QString &t) {
+        if (m_loading || !m_entry)
+            return;
+        const QString v = t.trimmed();
+        m_entry->set(m_primaryKey, v.isEmpty() ? QJsonValue(QJsonValue::Undefined) : QJsonValue(v));
+        updateHints();
+    });
 
     setEntry(nullptr);
 }
 
 void EntryEditor::setEntry(const EntryPtr &e)
 {
-    if (m_entry && m_entry != e)
-        commitPrimary();
     m_entry = e;
     setEnabled(e != nullptr);
     refresh();
@@ -94,13 +118,43 @@ void EntryEditor::refresh()
     m_loading = true;
     const EntryPtr &e = m_entry;
     m_name->setText(e ? e->str(m_primaryKey) : QString());
-    m_fileLabel->setText(e && e->file ? e->file->path : QString());
+    m_fileLabel->setFullText(e && e->file ? e->file->path : m_fileHint);
     if (m_type)
         fillTypeCombo(e ? e->str(QStringLiteral("type")) : QString());
     for (auto &f : m_fields)
         fillCombo(f.second, f.first, e ? e->str(f.first.key) : QString());
     m_loading = false;
     updateHints();
+}
+
+void EntryEditor::setFileHint(const QString &text)
+{
+    m_fileHint = text;
+    if (!m_entry || !m_entry->file)
+        m_fileLabel->setFullText(text);
+}
+
+void EntryEditor::setOverridesVisible(bool visible)
+{
+    if (!m_overridesToggle)
+        return;
+    if (m_overridesToggle->isChecked() != visible) {
+        m_overridesToggle->setChecked(visible); // re-enters via toggled()
+        return;
+    }
+    m_overridesToggle->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
+    m_fieldsBox->setVisible(visible);
+    emit layoutChanged();
+}
+
+int EntryEditor::overrideCount() const
+{
+    int n = 0;
+    if (m_entry)
+        for (const auto &f : m_fields)
+            if (m_entry->has(f.first.key))
+                ++n;
+    return n;
 }
 
 void EntryEditor::fillCombo(QComboBox *c, const FieldSpec &s, const QString &value)
@@ -167,7 +221,7 @@ void EntryEditor::onComboChanged(const FieldSpec &s, QComboBox *c)
     if (jsonValueText(v) == m_entry->str(s.key))
         return;
     m_entry->set(s.key, v);
-    emit fieldChanged(m_entry, s.key);
+    updateHints();
 }
 
 void EntryEditor::onTypeChanged()
@@ -179,18 +233,6 @@ void EntryEditor::onTypeChanged()
         return;
     m_entry->set(QStringLiteral("type"), t.isEmpty() ? QJsonValue(QJsonValue::Undefined) : QJsonValue(t));
     updateHints();
-    emit fieldChanged(m_entry, QStringLiteral("type"));
-}
-
-void EntryEditor::commitPrimary()
-{
-    if (m_loading || !m_entry)
-        return;
-    const QString oldName = m_entry->str(m_primaryKey);
-    const QString newName = m_name->text().trimmed();
-    if (newName == oldName)
-        return;
-    emit renameRequested(m_entry, oldName, newName); // receiver validates, applies and calls refresh()
 }
 
 void EntryEditor::focusPrimary()
@@ -225,17 +267,20 @@ void EntryEditor::setCgroupNames(const QStringList &names)
 void EntryEditor::updateHints()
 {
     if (m_mode == RuleMode && m_name->text().trimmed().size() > 15) {
-        m_nameHint->setText(tr("Note: the kernel truncates process names (/proc/PID/comm) to 15 characters."));
-        m_nameHint->show();
+        m_nameHint->setVisible(true);
     } else {
-        m_nameHint->hide();
+        m_nameHint->setVisible(false);
     }
     if (m_typeInfo) {
         const QString t = m_entry ? m_entry->str(QStringLiteral("type")) : QString();
         QString info;
         if (!t.isEmpty() && m_describe)
             info = m_describe(t);
-        m_typeInfo->setText(info);
-        m_typeInfo->setVisible(!info.isEmpty());
+        m_typeInfo->setFullText(t.isEmpty() ? tr("No type: only the overrides apply") : info);
+    }
+    if (m_overridesToggle) {
+        const int n = overrideCount();
+        m_overridesToggle->setText(n == 0 ? tr("Overrides (optional)")
+                                          : tr("Overrides (%n set)", nullptr, n));
     }
 }

@@ -6,12 +6,16 @@ A GUI editor for [Ananicy](https://github.com/Nefelim4ag/Ananicy) and ananicy-cp
 
 - **Types & Rules tab**
   - Table of all types (from every `*.types` file) showing their settings and how many rules use them.
-    Double-click a type to show only the rules that use it.
-  - Every type setting except the name is a drop-down: `nice`, `latency_nice`, `ioclass`, `ionice`,
-    `sched`, `rtprio`, `oom_score_adj`, `cgroup` (cgroups come from your `*.cgroups` files).
+    **Show its rules** filters the rules list by the selected type; **Show all rules** clears the filter.
   - Table of all rules (every `*.rules` file under the config dir, including all of `00-default/**`),
-    with search and a type filter. Assign a type to a process from the types that exist, and
-    optionally set per-rule overrides.
+    with search and a type filter.
+  - Double-click an entry (or select it and press **Edit…** / Enter) to edit it in a pop-up dialog;
+    **Add…** opens the same dialog for a new entry. Changes are only applied when you press OK.
+  - In the type dialog, every setting except the name is a drop-down: `nice`, `latency_nice`,
+    `ioclass`, `ionice`, `sched`, `rtprio`, `oom_score_adj`, `cgroup` (cgroups come from your
+    `*.cgroups` files).
+  - In the rule dialog, you assign the process a type from the types that exist. Optional per-rule
+    overrides are folded away under **Overrides**; the button shows how many are set.
   - **Add from running process…** lists the running processes (grouped by `/proc/PID/comm`, with
     executable, command line and any existing rule) and creates a rule from your pick.
 - **ananicy.conf tab**: all known keys as drop-downs (`check_freq`, `*_load`, `apply_*`,
