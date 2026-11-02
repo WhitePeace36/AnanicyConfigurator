@@ -15,7 +15,7 @@ if [[ -n ${startdir:-} && ${BUILDDIR:-$startdir} -ef $startdir ]]; then
 fi
 
 pkgname=ananicy-configurator
-pkgver=1.0.r2.5d3b73e
+pkgver=1.0.0.r7.gb13294e
 pkgrel=1
 pkgdesc="Qt GUI to edit ananicy / ananicy-cpp types, rules and ananicy.conf"
 arch=('x86_64' 'aarch64')
@@ -26,15 +26,27 @@ makedepends=('cmake')
 optdepends=('ananicy-cpp: the daemon this program configures'
             'ananicy: original ananicy daemon (alternative to ananicy-cpp)')
 
+# Version scheme (the version itself is set in CMakeLists.txt, project(... VERSION x.y.z)):
+#   commit tagged v1.0.0         -> 1.0.0          (release)
+#   3 commits after v1.0.0       -> 1.0.0.r3.gabc1234
+#   no v1.0.0 tag yet            -> 1.0.0.r<all commits>.g<hash>
 pkgver() {
-    local ver
+    local ver count
     ver=$(sed -n 's/^project([^)]*VERSION \([0-9.]*\).*/\1/p' "$startdir/CMakeLists.txt")
-    if git -C "$startdir" rev-parse --git-dir >/dev/null 2>&1; then
-        printf "%s.r%s.%s" "$ver" "$(git -C "$startdir" rev-list --count HEAD)" \
-            "$(git -C "$startdir" rev-parse --short=7 HEAD)"
-    else
-        printf "%s" "$ver"
+    if ! git -C "$startdir" rev-parse --git-dir >/dev/null 2>&1; then
+        printf "%s" "$ver" # not a git checkout (e.g. a release tarball)
+        return
     fi
+    if git -C "$startdir" tag --points-at HEAD | grep -qx "v$ver"; then
+        printf "%s" "$ver"
+        return
+    fi
+    if git -C "$startdir" rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+        count=$(git -C "$startdir" rev-list --count "v$ver..HEAD")
+    else
+        count=$(git -C "$startdir" rev-list --count HEAD)
+    fi
+    printf "%s.r%s.g%s" "$ver" "$count" "$(git -C "$startdir" rev-parse --short=7 HEAD)"
 }
 
 build() {

@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName(QStringLiteral("ananicy-gui"));
     QApplication::setOrganizationName(QStringLiteral("ananicy-gui"));
     QApplication::setApplicationDisplayName(QStringLiteral("Ananicy Configurator"));
-    QApplication::setApplicationVersion(QStringLiteral("1.0"));
+    QApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
     QApplication::setDesktopFileName(QStringLiteral("ananicy-gui")); // lets Wayland compositors find the icon
 
     QIcon icon;

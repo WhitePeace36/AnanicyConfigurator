@@ -131,6 +131,52 @@ is written to the project root. The package installs `/usr/bin/ananicy-gui`, a d
 To rebuild after changing or pulling the code, run `makepkg -sif`. To uninstall, run
 `sudo pacman -R ananicy-configurator`.
 
+## Debian / Ubuntu and Fedora packages
+
+CPack builds a `.deb` and/or `.rpm`. Build each package **on the distribution it is for**: the Qt
+dependencies are read from the system it is built on, and Debian, Ubuntu and Fedora name their
+Qt packages differently (for example `libqt6core6` on Debian 12 vs `libqt6core6t64` on
+Ubuntu 24.04).
+
+```bash
+# Debian / Ubuntu:  sudo apt install cmake g++ qt6-base-dev dpkg-dev
+# Fedora:           sudo dnf install cmake gcc-c++ qt6-qtbase-devel rpm-build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cd build && cpack
+# -> ananicy-configurator_1.0.0-1_amd64.deb   (if dpkg-deb is installed)
+# -> ananicy-configurator-1.0.0-1.x86_64.rpm  (if rpmbuild is installed)
+
+sudo apt install ./ananicy-configurator_1.0.0-1_amd64.deb   # Debian / Ubuntu
+sudo dnf install ./ananicy-configurator-1.0.0-1.x86_64.rpm  # Fedora
+```
+
+CPack has no generator for Arch Linux packages; use the `PKGBUILD` above for Arch.
+
+### Releasing a version
+
+The version is set in one place: `project(ananicy-gui VERSION 1.0.0 ...)` in `CMakeLists.txt`.
+The package version depends on git tags:
+
+| Built commit | Package version |
+|---|---|
+| tagged `v1.0.0` | `1.0.0` |
+| 3 commits after the `v1.0.0` tag | `1.0.0.r3.gabc1234` |
+| no `v1.0.0` tag yet | `1.0.0.r<number of commits>.g<hash>` |
+
+To release a version:
+
+```bash
+# 1. set the version in CMakeLists.txt (if it changed), commit
+# 2. tag the commit and push the tag
+git tag v1.0.0
+git push origin v1.0.0
+# 3. build
+makepkg -sif        # -> ananicy-configurator-1.0.0-1-x86_64.pkg.tar.zst
+```
+
+For the next release, raise the version in `CMakeLists.txt` (e.g. to 1.1.0) and tag `v1.1.0`.
+
 ## Notes
 
 - Ananicy matches rules against the kernel process name (`/proc/PID/comm`), which the kernel cuts
