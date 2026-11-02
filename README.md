@@ -153,30 +153,6 @@ sudo dnf install ./ananicy-configurator-1.0.0-1.x86_64.rpm  # Fedora
 
 CPack has no generator for Arch Linux packages; use the `PKGBUILD` above for Arch.
 
-### Releasing a version
-
-The version is set in one place: `project(ananicy-gui VERSION 1.0.0 ...)` in `CMakeLists.txt`.
-The package version depends on git tags:
-
-| Built commit | Package version |
-|---|---|
-| tagged `v1.0.0` | `1.0.0` |
-| 3 commits after the `v1.0.0` tag | `1.0.0.r3.gabc1234` |
-| no `v1.0.0` tag yet | `1.0.0.r<number of commits>.g<hash>` |
-
-To release a version:
-
-```bash
-# 1. set the version in CMakeLists.txt (if it changed), commit
-# 2. tag the commit and push the tag
-git tag v1.0.0
-git push origin v1.0.0
-# 3. build
-makepkg -sif        # -> ananicy-configurator-1.0.0-1-x86_64.pkg.tar.zst
-```
-
-For the next release, raise the version in `CMakeLists.txt` (e.g. to 1.1.0) and tag `v1.1.0`.
-
 ## Notes
 
 - Ananicy matches rules against the kernel process name (`/proc/PID/comm`), which the kernel cuts
