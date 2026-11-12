@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QCryptographicHash>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -49,13 +50,16 @@ static EntryPtr parseLine(const QString &line, QString *error)
     QString jsonPart = t;
     QString trailing;
     QJsonParseError pe;
-    QJsonDocument doc = QJsonDocument::fromJson(t.toUtf8(), &pe);
-    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
+    const QByteArray utf8 = t.toUtf8();
+    QJsonDocument doc = QJsonDocument::fromJson(utf8, &pe);
+    if (pe.error == QJsonParseError::GarbageAtEnd && pe.offset > 0) {
         // maybe there is a trailing comment: { ... } # comment
-        int close = t.lastIndexOf(QLatin1Char('}'));
-        if (close > 0) {
-            jsonPart = t.left(close + 1);
-            trailing = t.mid(close + 1).trimmed();
+        // The parser reports where the object ends (a byte offset), so a '}' inside the
+        // comment does not matter.
+        const QString rest = QString::fromUtf8(utf8.mid(pe.offset)).trimmed();
+        if (rest.startsWith(QLatin1Char('#')) || rest.startsWith(QLatin1String("//"))) {
+            jsonPart = QString::fromUtf8(utf8.left(pe.offset)).trimmed();
+            trailing = rest;
             doc = QJsonDocument::fromJson(jsonPart.toUtf8(), &pe);
         }
     }
@@ -151,7 +155,7 @@ QString ConfFile::render(const QStringList &keyOrder) const
                        : l.entry->originalLine;
         else
             out += l.raw;
-        out += QLatin1Char('\n');
+        out += eol;
     }
     return out;
 }
@@ -203,17 +207,22 @@ void EntryStore::clear()
 
 void EntryStore::loadFile(const QString &path)
 {
+    // Binary mode: QIODevice::Text would drop the '\r' of CRLF files, and the hash taken
+    // here would then never match fileHash() at save time.
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (!f.open(QIODevice::ReadOnly)) {
         warnings << QStringLiteral("Cannot read %1: %2").arg(path, f.errorString());
         return;
     }
     auto file = std::make_unique<ConfFile>();
     file->path = path;
     file->existed = true;
+    file->loaded = true;
 
     const QByteArray raw = f.readAll();
     file->diskHash = contentHash(raw);
+    if (raw.contains("\r\n"))
+        file->eol = QStringLiteral("\r\n");
     QString content = QString::fromUtf8(raw);
     if (content.endsWith(QLatin1Char('\n')))
         content.chop(1);
@@ -252,7 +261,9 @@ void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recur
     // Like ananicy-cpp (std::filesystem::recursive_directory_iterator), do not descend into
     // symlinked directories. This also guarantees that nothing outside the config
     // directory is ever written or deleted through such a link.
-    QDirIterator it(dir, QStringList{pattern}, QDir::Files | QDir::Readable,
+    // Unreadable files are not filtered out here: loadFile() reports them as a warning,
+    // and since they are never loaded, saving refuses to overwrite them.
+    QDirIterator it(dir, QStringList{pattern}, QDir::Files,
                     recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
     while (it.hasNext())
         paths << it.next();
@@ -270,7 +281,10 @@ ConfFile *EntryStore::fileFor(const QString &path)
     auto file = std::make_unique<ConfFile>();
     file->path = clean;
     file->existed = QFileInfo::exists(clean);
-    file->diskHash = fileHash(clean); // a not-loaded existing file will fail the safety check on save
+    // An existing file that was not loaded (e.g. unreadable) stays loaded == false, so
+    // loadedHash() reports it as unknown and saving refuses to overwrite it.
+    file->loaded = !file->existed;
+    file->diskHash = file->existed ? fileHash(clean) : QByteArray();
     ConfFile *raw = file.get();
     m_files.push_back(std::move(file));
     return raw;
@@ -286,6 +300,7 @@ EntryPtr EntryStore::add(const QString &filePath, const QString &primaryValue)
     file->lines.append({QString(), e});
     file->dirty = true;
     m_entries.append(e);
+    sortByLoadOrder(); // the new file may sort before files that are already loaded
     return e;
 }
 
@@ -322,6 +337,24 @@ void EntryStore::moveTo(const EntryPtr &e, const QString &filePath, bool reappen
     target->lines.append({QString(), e});
     target->dirty = true;
     e->file = target;
+}
+
+void EntryStore::sortByLoadOrder()
+{
+    // Same order as loadTree(): files sorted by path, then by line within each file.
+    QHash<const Entry *, int> lineOf;
+    for (const auto &f : m_files) {
+        for (int i = 0; i < f->lines.size(); ++i)
+            if (f->lines[i].entry)
+                lineOf.insert(f->lines[i].entry.get(), i);
+    }
+    std::stable_sort(m_entries.begin(), m_entries.end(), [&](const EntryPtr &a, const EntryPtr &b) {
+        const QString pa = a->file ? a->file->path : QString();
+        const QString pb = b->file ? b->file->path : QString();
+        if (const int c = QString::compare(pa, pb))
+            return c < 0;
+        return lineOf.value(a.get()) < lineOf.value(b.get());
+    });
 }
 
 void EntryStore::markModified(const EntryPtr &e)
@@ -372,6 +405,8 @@ bool EntryStore::loadedHash(const QString &path, QByteArray *hash) const
     const QString clean = QDir::cleanPath(path);
     for (const auto &f : m_files) {
         if (QDir::cleanPath(f->path) == clean) {
+            if (!f->loaded)
+                return false;
             *hash = f->diskHash;
             return true;
         }
@@ -396,6 +431,7 @@ void EntryStore::markSaved()
         if (f->shouldDelete() || f->shouldSkip()) {
             f->lines.clear();
             f->existed = false;
+            f->loaded = true; // known: does not exist
             f->loadedEntries = 0;
             f->diskHash.clear();
             f->dirty = false;
@@ -409,6 +445,7 @@ void EntryStore::markSaved()
         }
         f->dirty = false;
         f->existed = true;
+        f->loaded = true;
         f->loadedEntries = f->entryCount();
         f->diskHash = contentHash(f->render(m_keyOrder).toUtf8());
     }
@@ -422,23 +459,26 @@ void MainConf::load(const QString &p)
     m_lines.clear();
     dirty = false;
     m_sep = QStringLiteral("=");
+    m_eol = QStringLiteral("\n");
     QFile f(p);
     diskHash.clear();
-    existed = f.open(QIODevice::ReadOnly | QIODevice::Text);
+    existed = f.open(QIODevice::ReadOnly); // binary, see EntryStore::loadFile()
     if (!existed)
         return;
     const QByteArray raw = f.readAll();
     diskHash = contentHash(raw);
+    if (raw.contains("\r\n"))
+        m_eol = QStringLiteral("\r\n");
     QString content = QString::fromUtf8(raw);
     if (content.endsWith(QLatin1Char('\n')))
         content.chop(1);
     bool sepDetected = false;
-    for (QString raw : content.split(QLatin1Char('\n'))) {
-        if (raw.endsWith(QLatin1Char('\r')))
-            raw.chop(1);
+    for (QString line : content.split(QLatin1Char('\n'))) {
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
         Line l;
-        l.raw = raw;
-        const QString t = raw.trimmed();
+        l.raw = line;
+        const QString t = line.trimmed();
         int eq = t.indexOf(QLatin1Char('='));
         if (!t.isEmpty() && !t.startsWith(QLatin1Char('#')) && eq > 0) {
             l.kv = true;
@@ -520,6 +560,6 @@ QByteArray MainConf::render() const
 {
     QString out;
     for (const Line &l : m_lines)
-        out += l.raw + QLatin1Char('\n');
+        out += l.raw + m_eol;
     return out.toUtf8();
 }

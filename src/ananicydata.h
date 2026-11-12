@@ -37,9 +37,11 @@ struct ConfLine {
 struct ConfFile {
     QString path;
     bool existed = false;
+    bool loaded = false;     // content was read from disk (or written by us); false for files we never read
     bool dirty = false;
     int loadedEntries = 0;   // number of entries when read from disk
     QByteArray diskHash;     // SHA-1 of the file as read (empty = did not exist)
+    QString eol = QStringLiteral("\n"); // line ending used when writing ("\r\n" if the file had CRLF)
     QVector<ConfLine> lines;
 
     QString render(const QStringList &keyOrder) const;
@@ -72,7 +74,11 @@ public:
     void remove(const EntryPtr &e);
     // Keeps the entry's text and moves it to the end of another file. With reappend, an entry
     // that is already in that file is moved to its end too (used to keep load order when merging).
+    // Call sortByLoadOrder() after a batch of moves.
     void moveTo(const EntryPtr &e, const QString &filePath, bool reappend = false);
+    // Re-sorts entries() into the order ananicy loads them (file path, then line), so that
+    // find() and duplicate handling agree with what is on disk after entries were moved.
+    void sortByLoadOrder();
     void markModified(const EntryPtr &e);
 
     EntryPtr find(const QString &primaryValue) const;
@@ -81,7 +87,8 @@ public:
 
     QMap<QString, QByteArray> pendingWrites() const; // path -> new content for dirty files
     QStringList pendingDeletes() const;              // files that lost all their entries
-    bool loadedHash(const QString &path, QByteArray *hash) const; // false if the file is unknown
+    // false if the file is unknown, or exists on disk but was never read (e.g. unreadable)
+    bool loadedHash(const QString &path, QByteArray *hash) const;
     void markSaved();
 
     const QVector<EntryPtr> &entries() const { return m_entries; }
@@ -117,6 +124,7 @@ public:
 private:
     QVector<Line> m_lines;
     QString m_sep = QStringLiteral("=");
+    QString m_eol = QStringLiteral("\n");
 };
 
 QString jsonValueText(const QJsonValue &v);

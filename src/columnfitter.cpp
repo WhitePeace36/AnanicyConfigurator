@@ -6,12 +6,12 @@
 #include <QTableView>
 #include <QTimer>
 
-ColumnFitter::ColumnFitter(QTableView *view) : QObject(view), m_view(view)
+ColumnFitter::ColumnFitter(QTableView *view) : QObject(view), m_view(view), m_viewport(view->viewport())
 {
     view->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     view->horizontalHeader()->setStretchLastSection(false);
     view->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    view->viewport()->installEventFilter(this);
+    m_viewport->installEventFilter(this);
 
     QAbstractItemModel *m = view->model();
     connect(m, &QAbstractItemModel::modelReset, this, &ColumnFitter::schedule);
@@ -36,7 +36,9 @@ void ColumnFitter::schedule()
 
 bool ColumnFitter::eventFilter(QObject *obj, QEvent *ev)
 {
-    if (obj == m_view->viewport() && ev->type() == QEvent::Resize)
+    // Compare against the stored pointer: while the view is being destroyed the viewport still
+    // gets events, and calling m_view->viewport() then is undefined behaviour.
+    if (ev->type() == QEvent::Resize && obj == m_viewport)
         apply();
     return QObject::eventFilter(obj, ev);
 }

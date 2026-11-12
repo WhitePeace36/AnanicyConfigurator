@@ -15,14 +15,14 @@ if [[ -n ${startdir:-} && ${BUILDDIR:-$startdir} -ef $startdir ]]; then
 fi
 
 pkgname=ananicy-configurator
-pkgver=1.0.0.r7.gb13294e
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Qt GUI to edit ananicy / ananicy-cpp types, rules and ananicy.conf"
 arch=('x86_64' 'aarch64')
 url="https://github.com/WhitePeace36/AnanicyConfigurator"
 license=('GPL-2.0-only')
 depends=('qt6-base' 'polkit' 'systemd' 'hicolor-icon-theme' 'gcc-libs' 'glibc')
-makedepends=('cmake')
+makedepends=('cmake' 'git') # git: pkgver()
 optdepends=('ananicy-cpp: the daemon this program configures'
             'ananicy: original ananicy daemon (alternative to ananicy-cpp)')
 

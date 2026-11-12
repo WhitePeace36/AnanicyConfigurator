@@ -69,7 +69,7 @@ private:
     void reorganizeRules();
     void removeDuplicateRules();
     QString ruleFileFor(const QString &type) const; // 99-rules/<type>.rules or 99-rules/custom.rules
-    void placeNewRule(const EntryPtr &e);           // unsaved rules follow their type's file
+    void placeNewRule(const EntryPtr &e);           // unsaved rules follow their type's file (then sortByLoadOrder())
     void openRuleDialog(const EntryPtr &original, const QString &newName);
     void refreshRuleTypeFilter();
     void applyRuleTypeFilter();

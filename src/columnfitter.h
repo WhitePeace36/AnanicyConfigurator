@@ -1,8 +1,9 @@
 #pragma once
 
 #include <QObject>
-
+#include <QPointer>
 #include <QVector>
+#include <QWidget>
 
 class QTableView;
 
@@ -23,6 +24,7 @@ private:
     void apply();
 
     QTableView *m_view;
+    QPointer<QWidget> m_viewport; // kept so eventFilter() never calls into a view that is being destroyed
     QVector<int> m_natural;
     bool m_pending = false;
 };

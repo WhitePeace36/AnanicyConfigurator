@@ -74,6 +74,13 @@ int runProcess(const QString &program, const QStringList &args, QString *output)
     return p.exitStatus() == QProcess::NormalExit ? p.exitCode() : -1;
 }
 
+bool isPositiveNumber(const QString &t)
+{
+    bool ok = false;
+    const double v = t.toDouble(&ok);
+    return ok && v > 0;
+}
+
 QTableView *makeTable()
 {
     auto *v = new QTableView;
@@ -346,12 +353,24 @@ QWidget *MainWindow::buildConfTab()
             if ((!s.numeric && c->currentIndex() == 0) || t.isEmpty()) {
                 m_conf.unset(s.key);
             } else {
-                if (s.numeric && t.toDouble() <= 0)
-                    return;
+                if (s.numeric && !isPositiveNumber(t))
+                    return; // incomplete while typing (e.g. "0" on the way to "0.5")
                 m_conf.set(s.key, t);
             }
             updateDirtyState();
         });
+        if (s.numeric) {
+            // An invalid value left in the field would show something that is not saved:
+            // put the current value back when editing ends.
+            connect(c->lineEdit(), &QLineEdit::editingFinished, this, [this, s, c] {
+                const QString t = c->currentText().trimmed();
+                if (t.isEmpty() || isPositiveNumber(t))
+                    return;
+                m_confLoading = true;
+                c->setEditText(m_conf.get(s.key));
+                m_confLoading = false;
+            });
+        }
     }
     auto *scroll = new QScrollArea;
     scroll->setWidget(known);
@@ -514,7 +533,6 @@ void MainWindow::recomputeUsage()
 
 void MainWindow::typeNamesChanged()
 {
-    const QStringList names = m_types.names();
     refreshRuleTypeFilter();
 }
 
@@ -565,6 +583,11 @@ bool MainWindow::saveAll(bool restart)
         else if (seen.contains(n) && t->modified)
             errors << tr("Type \"%1\" is defined more than once").arg(n);
         seen.insert(n);
+    }
+    for (const auto &p : m_confCombos) {
+        const QString t = p.second->currentText().trimmed();
+        if (p.first.numeric && !t.isEmpty() && !isPositiveNumber(t))
+            errors << tr("ananicy.conf: %1 must be a number greater than 0 (it is \"%2\")").arg(p.first.key, t);
     }
     QStringList missing;
     for (const auto &r : m_rules.entries()) {
@@ -704,7 +727,9 @@ QStringList MainWindow::checkTargets(const QStringList &writes, const QStringLis
             known = true;
         }
         if (!known) {
-            problems << tr("%1: was never loaded by this program").arg(rel);
+            problems << (QFileInfo::exists(p)
+                             ? tr("%1: exists but was not loaded (is it readable?); it is not overwritten").arg(rel)
+                             : tr("%1: was never loaded by this program").arg(rel));
             return;
         }
         const QByteArray current = fileHash(p);
@@ -927,8 +952,11 @@ void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
             QMessageBox::warning(parent, tr("Type"), tr("The type name cannot be empty."));
             return false;
         }
+        // Only check when the name changes: find() returns the last definition, so for a type
+        // that is already defined twice the earlier copy would otherwise never pass.
+        const bool renamed = !original || original->str(QStringLiteral("type")) != n;
         EntryPtr other = m_types.find(n);
-        if (other && other != original) {
+        if (renamed && other && other != original) {
             QMessageBox::warning(parent, tr("Type"), tr("Type \"%1\" already exists.").arg(n));
             return false;
         }
@@ -968,6 +996,8 @@ void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
                     m_rules.markModified(r);
                     placeNewRule(r);
                 }
+                m_rules.sortByLoadOrder();
+                m_ruleModel->reset();
             }
         }
     }
@@ -1122,7 +1152,8 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
         original->fields = work->fields;
         m_rules.markModified(original);
         placeNewRule(original);
-        m_ruleModel->entryChanged(original);
+        m_rules.sortByLoadOrder(); // an unsaved rule may have moved to another file
+        m_ruleModel->reset();
     }
     recomputeUsage();
     m_typeModel->allChanged();
@@ -1367,6 +1398,7 @@ void MainWindow::reorganizeRules()
         if (targets.contains(target))
             m_rules.moveTo(r, target, true);
     }
+    m_rules.sortByLoadOrder();
     m_ruleModel->reset();
     recomputeUsage();
     updateDirtyState();
@@ -1452,6 +1484,7 @@ void MainWindow::reorganizeTypes()
     const QVector<EntryPtr> all = m_types.entries();
     for (const auto &t : all)
         m_types.moveTo(t, target, true);
+    m_types.sortByLoadOrder();
     m_typeModel->reset();
     updateDirtyState();
     statusBar()->showMessage(tr("Moved %1 types into %2. Press Save to write the changes.").arg(toMove).arg(target),
