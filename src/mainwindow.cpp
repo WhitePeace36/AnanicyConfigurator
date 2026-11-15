@@ -31,6 +31,7 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
+#include <QStandardPaths>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -45,7 +46,7 @@ namespace {
 
 const char *kNotSet = "(not set)";
 
-enum RuleCol { RColName, RColType, RColOverrides, RColFile };
+enum RuleCol { RColName, RColCmdline, RColType, RColOverrides, RColFile };
 
 QString shellQuote(const QString &s)
 {
@@ -235,12 +236,20 @@ QWidget *MainWindow::buildRulesPane()
     m_ruleModel = new EntryModel(&m_rules, m_root, this);
     m_ruleModel->setColumns({
         {tr("Process name"), [](const Entry &e) { return e.str(QStringLiteral("name")); }, {}},
+        {tr("Command line contains"), [](const Entry &e) { return rulematch::needlesText(e); },
+         [](const Entry &e) {
+             return rulematch::hasCmdline(e)
+                 ? tr("Only %1 processes whose command line contains: %2")
+                       .arg(e.str(QStringLiteral("name")), rulematch::needlesText(e))
+                 : QString();
+         }},
         {tr("Type"), [](const Entry &e) { return e.str(QStringLiteral("type")); }, {}},
         {tr("Overrides"),
          [](const Entry &e) {
              QStringList parts;
              for (const auto &f : e.fields)
-                 if (f.first != QLatin1String("name") && f.first != QLatin1String("type"))
+                 if (f.first != QLatin1String("name") && f.first != QLatin1String("type")
+                     && f.first != rulematch::kCmdlineKey)
                      parts << f.first + QLatin1Char('=') + jsonValueText(f.second);
              return parts.join(QStringLiteral(", "));
          },
@@ -254,8 +263,11 @@ QWidget *MainWindow::buildRulesPane()
         const QString t = e.str(QStringLiteral("type"));
         if (!t.isEmpty() && !m_types.find(t))
             return tr("Type \"%1\" is not defined").arg(t);
-        if (m_nameCount.value(e.str(QStringLiteral("name"))) > 1)
-            return tr("Duplicate: there is more than one rule for this process (use \"Remove duplicates…\")");
+        const QString problem = m_ruleAnalysis.problem.value(&e);
+        if (!problem.isEmpty())
+            return problem;
+        if (!m_cmdlineSupported && rulematch::hasCmdline(e))
+            return cmdlineUnsupportedNote();
         return QString();
     });
 
@@ -277,7 +289,8 @@ QWidget *MainWindow::buildRulesPane()
     reorg->setToolTip(tr("Move every rule into %1/<type>.rules (rules without a type: custom.rules)")
                           .arg(QDir(m_root).relativeFilePath(m_rulesDir)));
     auto *dedup = new QPushButton(tr("Remove duplicates…"));
-    dedup->setToolTip(tr("Keep one rule per process name and delete the other copies"));
+    dedup->setToolTip(tr("Delete rules that are never used: extra copies of a rule for the same process, and rules "
+                         "with \"command line contains\" that an earlier rule always matches first"));
     btns->addWidget(add);
     btns->addWidget(addProc);
     btns->addWidget(edit);
@@ -444,8 +457,9 @@ QWidget *MainWindow::buildBottomBar()
     connect(reload, &QPushButton::clicked, this, &MainWindow::reloadFromDisk);
     connect(save, &QPushButton::clicked, this, [this] { saveAll(false); });
     connect(saveRestart, &QPushButton::clicked, this, [this] { saveAll(true); });
-    connect(m_service, &QComboBox::currentTextChanged, this, [](const QString &t) {
+    connect(m_service, &QComboBox::currentTextChanged, this, [this](const QString &t) {
         QSettings().setValue(QStringLiteral("service"), t.trimmed());
+        updateCmdlineSupport();
     });
     return w;
 }
@@ -463,6 +477,7 @@ void MainWindow::loadAll()
     m_cgroups.loadTree(m_root, QStringLiteral("*.cgroups"), true);
     m_conf.load(m_root + QStringLiteral("/ananicy.conf"));
 
+    updateCmdlineSupport();
     recomputeUsage();
     m_typeModel->reset();
     m_ruleModel->reset();
@@ -522,9 +537,8 @@ void MainWindow::updateDirtyState()
 void MainWindow::recomputeUsage()
 {
     m_usage.clear();
-    m_nameCount.clear();
+    m_ruleAnalysis = rulematch::analyze(m_rules.entries()); // entries() is in load order
     for (const auto &r : m_rules.entries()) {
-        m_nameCount[r->str(QStringLiteral("name"))]++;
         const QString t = r->str(QStringLiteral("type"));
         if (!t.isEmpty())
             m_usage[t]++;
@@ -546,6 +560,37 @@ QString MainWindow::describeType(const QString &name) const
         if (f.first != QLatin1String("type"))
             parts << f.first + QLatin1Char('=') + jsonValueText(f.second);
     return tr("Type settings: %1").arg(parts.isEmpty() ? tr("(none)") : parts.join(QStringLiteral(", ")));
+}
+
+void MainWindow::updateCmdlineSupport()
+{
+    const QString svc = m_service ? m_service->currentText().trimmed() : QString();
+    m_isAnanicyCpp = svc.contains(QLatin1String("ananicy-cpp"));
+    bool supported = false;
+    if (m_isAnanicyCpp) {
+        // ananicy-cpp only knows "cmdline_contains" if it was built with that feature; the
+        // key then appears as a string in the program itself.
+        QString exe = qEnvironmentVariable("ANANICY_CPP_BINARY");
+        if (exe.isEmpty())
+            exe = QStandardPaths::findExecutable(QStringLiteral("ananicy-cpp"));
+        QFile f(exe);
+        if (!exe.isEmpty() && f.open(QIODevice::ReadOnly))
+            supported = f.readAll().contains(QByteArrayLiteral("cmdline_contains"));
+    }
+    if (supported == m_cmdlineSupported)
+        return;
+    m_cmdlineSupported = supported;
+    if (m_ruleModel)
+        m_ruleModel->allChanged();
+}
+
+QString MainWindow::cmdlineUnsupportedNote() const
+{
+    const QString daemon = m_isAnanicyCpp ? tr("The installed ananicy-cpp") : tr("Ananicy");
+    return tr("%1 does not support \"command line contains\" (cmdline_contains). It ignores the field, so this "
+              "rule applies to every process with this name and replaces other rules for the same name. It needs "
+              "ananicy-cpp from github.com/WhitePeace36/ananicy-cpp.")
+        .arg(daemon);
 }
 
 QString MainWindow::detectService() const
@@ -1070,25 +1115,80 @@ void MainWindow::editRule()
 
 void MainWindow::addRuleFromProcess()
 {
-    ProcessDialog dlg([this](const QString &name) -> QString {
-        EntryPtr r = m_rules.find(name);
-        if (!r)
-            return {};
-        const QString t = r->str(QStringLiteral("type"));
-        return t.isEmpty() ? tr("(rule without type)") : t;
-    }, this);
-    if (dlg.exec() == QDialog::Accepted && !dlg.selectedName().isEmpty())
-        createRule(dlg.selectedName());
+    // What ananicy-cpp would apply: for a group (cmdline == nullptr) the rule for every process
+    // with that name plus how many command-line rules exist; for one process the rule it gets.
+    auto describe = [this](const QString &name, const QString *cmdline) -> QString {
+        auto text = [this](const EntryPtr &r) {
+            const QString t = r->str(QStringLiteral("type"));
+            QString s = t.isEmpty() ? tr("(rule without type)") : t;
+            if (rulematch::hasCmdline(*r))
+                s += tr(" (command line: %1)").arg(rulematch::needlesText(*r));
+            return s;
+        };
+        if (cmdline) {
+            const EntryPtr r = rulematch::match(m_rules.entries(), name, *cmdline);
+            return r ? text(r) : QString();
+        }
+        const EntryPtr plain = rulematch::match(m_rules.entries(), name, QString());
+        int byCmdline = 0;
+        for (const auto &r : m_rules.entries())
+            if (rulematch::hasCmdline(*r) && r->str(QStringLiteral("name")) == name)
+                ++byCmdline;
+        QStringList parts;
+        if (plain)
+            parts << text(plain);
+        if (byCmdline > 0)
+            parts << tr("%n rule(s) by command line", nullptr, byCmdline);
+        return parts.join(QStringLiteral(", "));
+    };
+    ProcessDialog dlg(describe, m_isAnanicyCpp, this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    const ProcessDialog::Selection sel = dlg.selection();
+    if (sel.name.isEmpty())
+        return;
+    if (!sel.specific) {
+        createRule(sel.name);
+        return;
+    }
+    const QString needle = rulematch::suggestNeedle(sel.argv);
+    if (needle.isEmpty())
+        statusBar()->showMessage(tr("No typical part found in this command line: enter the text that identifies it "
+                                    "under \"Command line contains\"."),
+                                 10000);
+    createRule(sel.name, needle.isEmpty() ? QStringList() : QStringList{needle});
 }
 
-void MainWindow::createRule(const QString &name)
+// The rule with the same name and the same command-line texts (order does not matter), i.e. the
+// one a new rule would compete with. Plain rules: the last one, which is the one that applies.
+static EntryPtr findSameRule(const QVector<EntryPtr> &rules, const QString &name, const QStringList &needles,
+                             const Entry *except = nullptr)
 {
-    if (EntryPtr ex = m_rules.find(name)) {
-        const auto r = QMessageBox::question(
-            this, tr("Rule exists"),
-            tr("A rule for \"%1\" already exists in %2.\n\nEdit the existing rule instead?")
-                .arg(name, ex->file ? ex->file->path : QString()),
-            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+    const QSet<QString> want(needles.begin(), needles.end());
+    EntryPtr found;
+    for (const auto &r : rules) {
+        if (r.get() == except || r->str(QStringLiteral("name")) != name)
+            continue;
+        const QStringList n = rulematch::needles(*r);
+        if (rulematch::hasCmdline(*r) != !needles.isEmpty() || QSet<QString>(n.begin(), n.end()) != want)
+            continue;
+        if (!needles.isEmpty())
+            return r; // cmdline rules: the first one is the one that is used
+        found = r;
+    }
+    return found;
+}
+
+void MainWindow::createRule(const QString &name, const QStringList &needles)
+{
+    if (EntryPtr ex = findSameRule(m_rules.entries(), name, needles)) {
+        const QString what = needles.isEmpty()
+            ? tr("A rule for \"%1\" already exists in %2.").arg(name, ex->file ? ex->file->path : QString())
+            : tr("A rule for \"%1\" with command line \"%2\" already exists in %3.")
+                  .arg(name, needles.join(QStringLiteral(" + ")), ex->file ? ex->file->path : QString());
+        const auto r = QMessageBox::question(this, tr("Rule exists"),
+                                             what + QStringLiteral("\n\n") + tr("Edit the existing rule instead?"),
+                                             QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
         if (r == QMessageBox::Cancel)
             return;
         if (r == QMessageBox::Yes) {
@@ -1097,19 +1197,28 @@ void MainWindow::createRule(const QString &name)
             return;
         }
     }
-    openRuleDialog(nullptr, name);
+    openRuleDialog(nullptr, name, needles);
 }
 
-void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName)
+void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName, const QStringList &newNeedles)
 {
     auto work = std::make_shared<Entry>(original ? *original : Entry());
     if (!original && !newName.isEmpty())
         work->set(QStringLiteral("name"), newName);
+    if (!original && !newNeedles.isEmpty())
+        work->set(rulematch::kCmdlineKey, rulematch::needlesValue(newNeedles));
 
-    EntryDialog dlg(EntryEditor::RuleMode,
-                    original ? tr("Edit rule \"%1\"").arg(original->str(QStringLiteral("name"))) : tr("New rule"),
-                    work, this);
+    QString title = tr("New rule");
+    if (original) {
+        title = rulematch::hasCmdline(*original)
+            ? tr("Edit rule \"%1\" (command line: %2)")
+                  .arg(original->str(QStringLiteral("name")), rulematch::needlesText(*original))
+            : tr("Edit rule \"%1\"").arg(original->str(QStringLiteral("name")));
+    }
+    EntryDialog dlg(EntryEditor::RuleMode, title, work, this);
     EntryEditor *ed = dlg.editor();
+    ed->setCmdlineSupport(m_cmdlineSupported, cmdlineUnsupportedNote());
+    ed->setNameLengthLimited(!m_isAnanicyCpp);
     ed->setFileHintFn([this](const Entry &e) {
         if (e.file && !e.originalLine.isEmpty())
             return e.file->path; // saved rules stay where they are
@@ -1124,15 +1233,34 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
             QMessageBox::warning(parent, tr("Rule"), tr("The process name cannot be empty."));
             return false;
         }
-        const bool renamed = !original || original->str(QStringLiteral("name")) != n;
-        EntryPtr other = m_rules.find(n);
-        if (renamed && other && other != original)
-            return QMessageBox::question(parent, tr("Rule"),
-                                         tr("Another rule for \"%1\" already exists in %2.\n"
-                                            "Ananicy will use whichever is loaded last. Continue?")
-                                             .arg(n, other->file ? other->file->path : QString()))
-                == QMessageBox::Yes;
-        return true;
+        bool valid = true;
+        const QStringList needles = rulematch::needles(e, &valid);
+        if (!valid) {
+            QMessageBox::warning(parent, tr("Rule"),
+                                 tr("\"Command line contains\" is not valid. Enter one text per line, or leave it "
+                                    "empty."));
+            return false;
+        }
+        // Only ask when the rule's identity (name + command-line texts) changes.
+        auto key = [](const Entry &x) {
+            QStringList k = rulematch::needles(x);
+            k.sort();
+            return QStringList{x.str(QStringLiteral("name")), rulematch::hasCmdline(x) ? QStringLiteral("1") : QString()}
+                   + k;
+        };
+        if (original && key(*original) == key(e))
+            return true;
+        const EntryPtr other = findSameRule(m_rules.entries(), n, needles, original.get());
+        if (!other)
+            return true;
+        const QString where = other->file ? other->file->path : QString();
+        const QString q = needles.isEmpty()
+            ? tr("Another rule for \"%1\" already exists in %2.\nAnanicy will use whichever is loaded last. "
+                 "Continue?").arg(n, where)
+            : tr("Another rule for \"%1\" with the same command line texts already exists in %2.\n"
+                 "ananicy-cpp uses whichever is loaded first, the other one is never used. Continue?")
+                  .arg(n, where);
+        return QMessageBox::question(parent, tr("Rule"), q) == QMessageBox::Yes;
     });
     if (newName.isEmpty() && !original)
         ed->focusPrimary();
@@ -1338,10 +1466,7 @@ void MainWindow::reorganizeRules()
 {
     // Duplicates with different types would land in different files, which can change
     // which copy wins. Offer to clean them up first.
-    int dupNames = 0;
-    for (auto it = m_nameCount.cbegin(); it != m_nameCount.cend(); ++it)
-        if (it.value() > 1)
-            ++dupNames;
+    const int dupNames = m_ruleAnalysis.duplicatePlainNames();
     if (dupNames > 0) {
         const auto r = QMessageBox::question(
             this, tr("Reorganize rules"),
@@ -1353,6 +1478,22 @@ void MainWindow::reorganizeRules()
             return;
         if (r == QMessageBox::Yes)
             removeDuplicateRules();
+    }
+
+    // Rules with "command line contains" are tried in load order and the first match wins, so
+    // they must keep their order relative to each other.
+    const QStringList reordered = rulematch::cmdlineOrderChanges(
+        m_rules.entries(), [this](const EntryPtr &r) { return ruleFileFor(r->str(QStringLiteral("type"))); });
+    if (!reordered.isEmpty()) {
+        const auto r = QMessageBox::warning(
+            this, tr("Reorganize rules"),
+            tr("The rules with \"command line contains\" for these processes have different types and would end up "
+               "in a different order:\n\n%1\n\nThey are tried in load order and the first one that matches wins, so "
+               "a process may then get a different rule. Reorganize anyway?")
+                .arg(reordered.mid(0, 15).join(QStringLiteral(", "))),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (r != QMessageBox::Yes)
+            return;
     }
 
     QVector<EntryPtr> toMove;
@@ -1408,32 +1549,43 @@ void MainWindow::reorganizeRules()
 
 void MainWindow::removeDuplicateRules()
 {
-    // Keep the copy that is loaded last (files load in alphabetical order, so a rule in
-    // 99-rules wins over one in 00-default; within a file the lower line wins).
-    QHash<QString, EntryPtr> keep;
-    for (const auto &r : m_rules.entries())
-        keep[r->str(QStringLiteral("name"))] = r;
-    QVector<EntryPtr> drop;
-    QStringList preview;
-    for (const auto &r : m_rules.entries()) {
-        const QString n = r->str(QStringLiteral("name"));
-        if (keep.value(n) == r)
-            continue;
-        drop << r;
-        if (preview.size() < 15) {
-            const EntryPtr k = keep.value(n);
-            preview << tr("%1: keep %2 (%3), remove %4")
-                           .arg(n, k->file ? m_ruleModel->relPath(k->file->path) : QString(),
-                                k->str(QStringLiteral("type")).isEmpty() ? tr("no type") : k->str(QStringLiteral("type")),
-                                r->file ? m_ruleModel->relPath(r->file->path) : QString());
-        }
-    }
+    // Only rules that can never apply are removed, so ananicy behaves the same afterwards:
+    //  * plain rules (no "command line contains"): every copy except the one loaded last (files
+    //    load in path order, so a rule in 99-rules wins over one in 00-default),
+    //  * rules with "command line contains" that an earlier rule for the same name always
+    //    matches first (identical texts, or texts that contain the earlier rule's texts).
+    const QVector<EntryPtr> drop = rulematch::removableDuplicates(m_rules.entries());
     if (drop.isEmpty()) {
         QMessageBox::information(this, tr("Remove duplicates"), tr("There are no duplicate rules."));
         return;
     }
-    QString q = tr("%n duplicate rule(s) will be removed. For each process the copy in the file that sorts "
-                   "last is kept, so a rule in 99-rules wins over one in 00-default:", nullptr, drop.size())
+    QHash<QString, EntryPtr> lastPlain;
+    for (const auto &r : m_rules.entries())
+        if (!rulematch::hasCmdline(*r))
+            lastPlain[r->str(QStringLiteral("name"))] = r;
+    auto fileOf = [this](const EntryPtr &e) { return e->file ? m_ruleModel->relPath(e->file->path) : QString(); };
+    auto typeOf = [this](const EntryPtr &e) {
+        const QString t = e->str(QStringLiteral("type"));
+        return t.isEmpty() ? tr("no type") : t;
+    };
+    QStringList preview;
+    for (const auto &r : drop) {
+        if (preview.size() >= 15)
+            break;
+        const QString n = r->str(QStringLiteral("name"));
+        if (rulematch::hasCmdline(*r)) {
+            const EntryPtr k = m_ruleAnalysis.shadowedBy.value(r.get());
+            preview << tr("%1 [%2]: never used, %3 [%4] matches first; remove %5")
+                           .arg(n, rulematch::needlesText(*r), k ? fileOf(k) : QString(),
+                                k ? rulematch::needlesText(*k) : QString(), fileOf(r));
+        } else {
+            const EntryPtr k = lastPlain.value(n);
+            preview << tr("%1: keep %2 (%3), remove %4").arg(n, fileOf(k), typeOf(k), fileOf(r));
+        }
+    }
+    QString q = tr("%n duplicate rule(s) will be removed. They are never used, so nothing changes for any process. "
+                   "For rules without \"command line contains\" the copy in the file that sorts last is kept, so "
+                   "a rule in 99-rules wins over one in 00-default:", nullptr, drop.size())
                 + QStringLiteral("\n\n") + preview.join(QLatin1Char('\n'));
     if (drop.size() > preview.size())
         q += QStringLiteral("\n…");

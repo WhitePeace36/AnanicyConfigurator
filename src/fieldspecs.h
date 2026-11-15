@@ -56,7 +56,7 @@ inline QStringList typeKeyOrder()
 
 inline QStringList ruleKeyOrder()
 {
-    QStringList l{"name", "type"};
+    QStringList l{"name", "cmdline_contains", "type"};
     for (const auto &s : typeFieldSpecs())
         l << s.key;
     return l;

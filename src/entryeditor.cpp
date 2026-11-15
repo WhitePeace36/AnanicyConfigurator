@@ -1,6 +1,7 @@
 #include "entryeditor.h"
 
 #include "elidedlabel.h"
+#include "rulematch.h"
 
 #include <QAction>
 #include <QComboBox>
@@ -10,6 +11,7 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QRegularExpressionValidator>
 #include <QStyle>
 #include <QToolButton>
@@ -39,6 +41,40 @@ EntryEditor::EntryEditor(Mode mode, QWidget *parent)
                               "so a longer name may never match."));
     m_nameHint->setVisible(false);
     form->addRow(mode == TypeMode ? tr("Type name:") : tr("Process name:"), m_name);
+
+    if (mode == RuleMode) {
+        // cmdline_contains: one text per line, all of them must occur in the command line
+        m_cmdline = new QPlainTextEdit;
+        m_cmdline->setTabChangesFocus(true);
+        m_cmdline->setLineWrapMode(QPlainTextEdit::NoWrap);
+        m_cmdline->setPlaceholderText(tr("Optional: only processes whose command line contains this text, "
+                                         "e.g. minecraft\n(one text per line; then all of them must appear)"));
+        m_cmdline->setToolTip(tr("ananicy-cpp \"cmdline_contains\": the rule only applies to processes with this "
+                                 "name whose command line (/proc/PID/cmdline, arguments joined by spaces) contains "
+                                 "every text listed here. Case-sensitive. Such rules are tried before the rule "
+                                 "for the same name without this field, and the first one that matches wins.\n\n"
+                                 "Leave it empty for a normal rule that applies to every process with this name."));
+        const QFontMetrics fm(m_cmdline->font());
+        m_cmdline->setFixedHeight(fm.lineSpacing() * 3 + 2 * m_cmdline->frameWidth()
+                                  + static_cast<int>(2 * m_cmdline->document()->documentMargin()));
+        form->addRow(tr("Command line contains:"), m_cmdline);
+        // two lines, word-wrapped, fixed height: long texts fit and the dialog does not jump
+        m_cmdlineNote = new QLabel;
+        m_cmdlineNote->setWordWrap(true);
+        m_cmdlineNote->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        m_cmdlineNote->setFixedHeight(m_cmdlineNote->fontMetrics().lineSpacing() * 2 + 2);
+        form->addRow(QString(), m_cmdlineNote);
+        connect(m_cmdline, &QPlainTextEdit::textChanged, this, [this] {
+            if (m_loading || !m_entry)
+                return;
+            QStringList texts;
+            for (const QString &line : m_cmdline->toPlainText().split(QLatin1Char('\n')))
+                if (!line.trimmed().isEmpty())
+                    texts << line.trimmed();
+            m_entry->set(rulematch::kCmdlineKey, rulematch::needlesValue(texts));
+            updateHints();
+        });
+    }
 
     if (mode == RuleMode) {
         m_type = new QComboBox;
@@ -118,6 +154,12 @@ void EntryEditor::refresh()
     m_loading = true;
     const EntryPtr &e = m_entry;
     m_name->setText(e ? e->str(m_primaryKey) : QString());
+    if (m_cmdline) {
+        bool valid = true;
+        const QStringList n = e ? rulematch::needles(*e, &valid) : QStringList();
+        // an invalid value from the file is shown as it is; editing it writes a valid one
+        m_cmdline->setPlainText(valid ? n.join(QLatin1Char('\n')) : jsonValueText(e->value(rulematch::kCmdlineKey)));
+    }
     m_fileLabel->setFullText(e && e->file ? e->file->path : m_fileHint);
     if (m_type)
         fillTypeCombo(e ? e->str(QStringLiteral("type")) : QString());
@@ -258,6 +300,13 @@ void EntryEditor::setTypeNames(const QStringList &names)
     }
 }
 
+void EntryEditor::setCmdlineSupport(bool supported, const QString &note)
+{
+    m_cmdlineSupported = supported;
+    m_cmdlineUnsupportedNote = note;
+    updateHints();
+}
+
 void EntryEditor::setCgroupNames(const QStringList &names)
 {
     m_cgroupNames = names;
@@ -266,10 +315,37 @@ void EntryEditor::setCgroupNames(const QStringList &names)
 
 void EntryEditor::updateHints()
 {
-    if (m_mode == RuleMode && m_name->text().trimmed().size() > 15) {
+    if (m_mode == RuleMode && m_nameLimited && m_name->text().trimmed().size() > 15) {
         m_nameHint->setVisible(true);
     } else {
         m_nameHint->setVisible(false);
+    }
+    if (m_cmdlineNote) {
+        bool valid = true;
+        const QStringList n = m_entry ? rulematch::needles(*m_entry, &valid) : QStringList();
+        const QString name = m_name->text().trimmed();
+        QString note, tip;
+        bool warn = false;
+        if (!valid) {
+            note = tr("⚠ The value in the file is not valid (ananicy-cpp ignores this rule). Edit it to fix it.");
+            warn = true;
+        } else if (!n.isEmpty() && !m_cmdlineSupported) {
+            note = QStringLiteral("⚠ ") + m_cmdlineUnsupportedNote;
+            warn = true;
+        } else if (!n.isEmpty()) {
+            const QString who = name.isEmpty() ? tr("Only processes") : tr("Only \"%1\" processes").arg(name);
+            note = n.size() == 1 ? tr("%1 with \"%2\" in the command line.").arg(who, n.first())
+                                 : tr("%1 with all %n texts in the command line.", nullptr, n.size()).arg(who);
+            tip = note + QLatin1Char(' ')
+                  + tr("Other %1 processes use the rule without this field, if there is one.")
+                        .arg(name.isEmpty() ? QString() : QStringLiteral("\"%1\"").arg(name)).simplified();
+        } else {
+            note = tr("Empty: the rule applies to every process with this name.");
+        }
+        m_cmdlineNote->setText(note);
+        m_cmdlineNote->setToolTip(tip.isEmpty() ? note : tip);
+        m_cmdlineNote->setStyleSheet(warn ? QStringLiteral("color: #b06000;") : QString());
+        m_cmdlineNote->setForegroundRole(warn ? QPalette::WindowText : QPalette::PlaceholderText);
     }
     if (m_typeInfo) {
         const QString t = m_entry ? m_entry->str(QStringLiteral("type")) : QString();

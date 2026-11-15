@@ -10,7 +10,9 @@
 class QComboBox;
 class QAction;
 class ElidedLabel;
+class QLabel;
 class QLineEdit;
+class QPlainTextEdit;
 class QGroupBox;
 class QToolButton;
 
@@ -36,6 +38,12 @@ public:
     void setCgroupNames(const QStringList &names);
     void setTypeDescriber(std::function<QString(const QString &)> fn) { m_describe = std::move(fn); }
     void setOverridesVisible(bool visible);
+    // Whether the daemon understands "cmdline_contains" (ananicy-cpp with that feature); `note`
+    // explains what happens otherwise and is shown when the field is used.
+    void setCmdlineSupport(bool supported, const QString &note);
+    // The original Ananicy matches /proc/PID/comm (cut at 15 characters), ananicy-cpp the
+    // full file name of argv[0]: only warn about long names for the former.
+    void setNameLengthLimited(bool limited) { m_nameLimited = limited; updateHints(); }
 
 signals:
     void layoutChanged(); // overrides shown/hidden
@@ -55,6 +63,11 @@ private:
     QString m_fileHint;
 
     QLineEdit *m_name = nullptr;
+    QPlainTextEdit *m_cmdline = nullptr;
+    QLabel *m_cmdlineNote = nullptr;
+    bool m_cmdlineSupported = true;
+    QString m_cmdlineUnsupportedNote;
+    bool m_nameLimited = true;
     QAction *m_nameHint = nullptr;
     QComboBox *m_type = nullptr;
     ElidedLabel *m_typeInfo = nullptr;

@@ -25,6 +25,8 @@ add_executable(ananicy-gui
     src/columnfitter.cpp
     src/processdialog.h
     src/processdialog.cpp
+    src/rulematch.h
+    src/rulematch.cpp
     src/mainwindow.h
     src/mainwindow.cpp
     resources.qrc
@@ -33,6 +35,26 @@ add_executable(ananicy-gui
 target_link_libraries(ananicy-gui PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 # the version is defined once, in project() above
 target_compile_definitions(ananicy-gui PRIVATE APP_VERSION="${PROJECT_VERSION}")
+
+option(ANANICY_GUI_TESTS "Build the tests (run them with ctest)" OFF)
+if(ANANICY_GUI_TESTS)
+    enable_testing()
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Test)
+    add_executable(test_rulematch tests/test_rulematch.cpp src/ananicydata.cpp src/rulematch.cpp)
+    target_include_directories(test_rulematch PRIVATE src)
+    target_link_libraries(test_rulematch PRIVATE Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Test)
+    add_test(NAME rulematch COMMAND test_rulematch)
+
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+    add_executable(test_gui tests/test_gui.cpp
+        src/ananicydata.cpp src/rulematch.cpp src/entrymodel.cpp src/entryeditor.cpp src/entrydialog.cpp
+        src/columnfitter.cpp src/processdialog.cpp src/mainwindow.cpp src/elidedlabel.h)
+    target_include_directories(test_gui PRIVATE src)
+    target_compile_definitions(test_gui PRIVATE APP_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(test_gui PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Test)
+    add_test(NAME gui COMMAND test_gui)
+    set_tests_properties(gui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
 
 install(TARGETS ananicy-gui RUNTIME DESTINATION bin)
 install(FILES ananicy-gui.desktop DESTINATION share/applications)

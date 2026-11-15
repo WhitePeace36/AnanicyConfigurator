@@ -30,13 +30,60 @@
     `*.cgroups` files).
   - In the rule dialog, you assign the process a type from the types that exist. Optional per-rule
     overrides are folded away under **Overrides**; the button shows how many are set.
-  - **Add from running process…** lists the running processes (grouped by `/proc/PID/comm`, with
-    executable, command line and any existing rule) and creates a rule from your pick.
+  - **Command line contains** (ananicy-cpp): a rule can apply to only one program among processes
+    with the same name, e.g. one Java or Python program. See
+    [Rules for one program](#rules-for-one-program-command-line-contains).
+  - **Add from running process…** lists the running processes with their executable, command line
+    and the rule they get now. Pick a name for a rule that applies to all of its processes, or (with
+    ananicy-cpp) unfold it and pick one command line for a rule that only applies to that program.
+    With ananicy-cpp the processes are grouped by the name ananicy-cpp matches (the file name of
+    `argv[0]`). With the original Ananicy they are grouped by `/proc/PID/comm`.
 - **ananicy.conf tab**: all known keys as drop-downs (`check_freq`, `*_load`, `apply_*`,
   `loglevel`, …). Keys the program doesn't know about are kept and can be edited too.
 - **Save** / **Save & Restart service**: writes the changed files, then runs
   `systemctl restart <service>`. The service name is auto-detected (`ananicy` or `ananicy-cpp`)
   and can be changed in the bottom bar.
+
+## Rules for one program (command line contains)
+
+Ananicy matches rules against the program name, so every Java program is `java` and every Python
+script is `python3`. [ananicy-cpp from WhitePeace36/ananicy-cpp](https://github.com/WhitePeace36/ananicy-cpp)
+adds `cmdline_contains` to tell them apart. In the rule dialog it is the **Command line contains**
+field:
+
+- Enter one text per line. The rule then only applies to processes with this name whose command
+  line (`/proc/PID/cmdline`, the arguments joined by spaces) contains **all** of the texts.
+  The texts are case-sensitive.
+- Leave the field empty for a normal rule that applies to every process with this name.
+- One text is saved as `"cmdline_contains": "minecraft"`, several as a list:
+  `"cmdline_contains": ["-jar", "jenkins.war"]`.
+
+```json
+{ "name": "java", "cmdline_contains": "minecraft", "type": "Game" }
+{ "name": "java", "cmdline_contains": ["-jar", "jenkins.war"], "type": "Service" }
+{ "name": "java", "type": "BG_CPUIO" }
+```
+
+How ananicy-cpp picks a rule, and what the configurator therefore checks:
+
+- Rules with **command line contains** are tried in load order (files sorted by path, then line
+  by line), and **the first one that matches wins**. If none matches, the rule for the same name
+  without it is used, if there is one.
+- They don't replace each other or the normal rule, so several rules for `java` are fine. A rule
+  is only reported as **never used** if an earlier rule for the same name always matches first:
+  the same texts, or texts that contain the earlier rule's texts (`minecraft-server` after
+  `minecraft`). **Remove duplicates…** deletes those.
+- Adding a rule with the same name and the same texts as an existing one asks first.
+- **Add from running process…** → unfold a name → pick a command line. This creates such a rule
+  and suggests a text: the jar after `-jar`, the module after `-m`, or the script or program
+  argument (e.g. `server.jar`, `jupyter-lab`, `http.server`). Check that the text is specific
+  enough. The **Existing rule** column shows the rule each command line gets now.
+
+The configurator checks whether the installed `ananicy-cpp` supports the field (it looks for
+`cmdline_contains` in the program; set `ANANICY_CPP_BINARY=/path/to/ananicy-cpp` if it is not on
+the `PATH`). If it doesn't, for example with upstream ananicy-cpp or the original Ananicy, the rules
+that use it are marked: those programs ignore the field, so the rule would apply to every process
+with that name and replace other rules for that name.
 
 ## Where changes are written
 
@@ -58,11 +105,16 @@ for rules without a type.
 **Reorganize into 99-rules/…** moves every rule into the structure above. If some process names
 have more than one rule, it first offers to remove the duplicates. Otherwise copies with
 different types would end up in different files, which can change which copy Ananicy uses.
-**Remove duplicates…**
-keeps one rule per process name and deletes the other copies. For each name it keeps the copy in
-the file that sorts last, so a rule in `99-rules` wins over one in `00-default`. Rules that are
-duplicates are shown in red until you remove them. Neither button writes anything until you
-press Save.
+It also warns before rules with **command line contains** for the same name would end up in a
+different order, because the first matching one wins.
+**Remove duplicates…** deletes rules that are never used, so nothing changes for any process:
+- extra rules for the same process name without **command line contains**: it keeps the copy in
+  the file that sorts last, so a rule in `99-rules` wins over one in `00-default`,
+- rules with **command line contains** that an earlier rule for the same name always matches
+  first (see below).
+
+Rules that are duplicates or never used are shown in red until you remove them. Neither button
+writes anything until you press Save.
 
 Comments, blank lines, formatting of untouched lines and unknown keys are preserved byte-for-byte.
 Only files that actually changed are written; no backup copies are made. A file that ends up with
@@ -105,6 +157,14 @@ cmake --build build -j
 
 # optional: install to /usr/local (binary, .desktop entry and icon)
 sudo cmake --install build
+```
+
+Tests (rule matching, and the real window driven on a temporary config directory):
+
+```bash
+cmake -S . -B build -DANANICY_GUI_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
 To try it on a copy of your config without touching `/etc`:

@@ -1,5 +1,7 @@
 #include "processdialog.h"
 
+#include "rulematch.h"
+
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -19,12 +21,19 @@
 
 namespace {
 
+struct ProcInstance {        // processes with the same command line
+    QStringList argv;
+    QString cmdline;         // arguments joined by single spaces, as ananicy-cpp matches it
+    QStringList pids;
+    QStringList users;
+};
+
 struct ProcGroup {
-    QString comm;
+    QString name;
     QStringList pids;
     QString exe;
-    QString cmdline;
     QStringList users;
+    QMap<QString, ProcInstance> instances; // by cmdline
 };
 
 QByteArray readSmall(const QString &path)
@@ -33,6 +42,16 @@ QByteArray readSmall(const QString &path)
     if (!f.open(QIODevice::ReadOnly))
         return {};
     return f.read(64 * 1024);
+}
+
+QStringList splitArgv(const QByteArray &raw)
+{
+    QStringList argv;
+    for (const QByteArray &a : raw.split('\0'))
+        argv << QString::fromLocal8Bit(a);
+    while (!argv.isEmpty() && argv.last().isEmpty()) // terminator / setproctitle padding
+        argv.removeLast();
+    return argv;
 }
 
 QString userOf(const QString &path)
@@ -45,19 +64,33 @@ QString userOf(const QString &path)
     return QString::number(st.st_uid);
 }
 
+void addUnique(QStringList &l, const QString &v)
+{
+    if (!v.isEmpty() && !l.contains(v))
+        l << v;
+}
+
 enum Col { ColName, ColCount, ColUser, ColRule, ColExe, ColCmd };
+enum Role { ArgvRole = Qt::UserRole, SpecificRole, NameRole };
 
 } // namespace
 
-ProcessDialog::ProcessDialog(std::function<QString(const QString &)> existingRule, QWidget *parent)
-    : QDialog(parent), m_existing(std::move(existingRule))
+ProcessDialog::ProcessDialog(Describe describe, bool ananicyCpp, QWidget *parent)
+    : QDialog(parent), m_describe(std::move(describe)), m_ananicyCpp(ananicyCpp)
 {
     setWindowTitle(tr("Select running process"));
     resize(1000, 600);
 
     auto *lay = new QVBoxLayout(this);
-    auto *info = new QLabel(tr("Ananicy matches rules against the process name (<tt>/proc/PID/comm</tt>), "
-                               "shown in the first column. You can still edit the name afterwards."));
+    auto *info = new QLabel(
+        ananicyCpp
+            ? tr("ananicy-cpp matches rules against the program name (the file name of <tt>argv[0]</tt>), shown in "
+                 "the first column. Pick a name for a rule that applies to all of its processes, or unfold it and pick "
+                 "one command line for a rule that only applies to processes with that command line "
+                 "(<i>command line contains</i>, e.g. one Java or Python program). You can still edit everything "
+                 "afterwards.")
+            : tr("Ananicy matches rules against the process name (<tt>/proc/PID/comm</tt>), "
+                 "shown in the first column. You can still edit the name afterwards."));
     info->setWordWrap(true);
     lay->addWidget(info);
 
@@ -76,23 +109,25 @@ ProcessDialog::ProcessDialog(std::function<QString(const QString &)> existingRul
     lay->addLayout(top);
 
     m_list = new QTreeWidget;
-    m_list->setRootIsDecorated(false);
+    m_list->setRootIsDecorated(ananicyCpp);
     m_list->setUniformRowHeights(true);
     m_list->setSortingEnabled(true);
     m_list->setAlternatingRowColors(true);
-    m_list->setHeaderLabels({tr("Name (comm)"), tr("Instances"), tr("User"), tr("Existing rule"),
-                             tr("Executable"), tr("Command line")});
+    m_list->setHeaderLabels({ananicyCpp ? tr("Name (argv[0])") : tr("Name (comm)"), tr("Instances"), tr("User"),
+                             tr("Existing rule"), tr("Executable"), tr("Command line")});
     m_list->header()->setSectionResizeMode(QHeaderView::Interactive);
     m_list->header()->setStretchLastSection(true);
     lay->addWidget(m_list, 1);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Create rule"));
+    m_ok = buttons->button(QDialogButtonBox::Ok);
+    m_ok->setText(tr("Create rule"));
     lay->addWidget(buttons);
 
     connect(buttons, &QDialogButtonBox::accepted, this, &ProcessDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(m_list, &QTreeWidget::itemDoubleClicked, this, [this] { accept(); });
+    connect(m_list, &QTreeWidget::currentItemChanged, this, &ProcessDialog::updateOkButton);
     connect(refresh, &QPushButton::clicked, this, &ProcessDialog::reload);
     connect(m_hideKernel, &QCheckBox::toggled, this, &ProcessDialog::reload);
     connect(m_hideRuled, &QCheckBox::toggled, this, &ProcessDialog::applyFilter);
@@ -115,36 +150,65 @@ void ProcessDialog::reload()
         const QString comm = QString::fromLocal8Bit(readSmall(base + QStringLiteral("/comm"))).trimmed();
         if (comm.isEmpty())
             continue;
-        QByteArray cmd = readSmall(base + QStringLiteral("/cmdline"));
-        const bool kernel = cmd.isEmpty();
+        const QByteArray raw = readSmall(base + QStringLiteral("/cmdline"));
+        const bool kernel = raw.isEmpty();
         if (kernel && m_hideKernel->isChecked())
             continue;
-        cmd.replace('\0', ' ');
+        const QStringList argv = splitArgv(raw);
+        const QString exe = QFileInfo(base + QStringLiteral("/exe")).symLinkTarget();
+        const QString name = m_ananicyCpp ? rulematch::processName(argv, exe, comm) : comm;
+        if (name.isEmpty())
+            continue;
 
-        ProcGroup &g = groups[comm];
-        g.comm = comm;
+        ProcGroup &g = groups[name];
+        g.name = name;
         g.pids << pid;
         const QString user = userOf(base);
-        if (!user.isEmpty() && !g.users.contains(user))
-            g.users << user;
+        addUnique(g.users, user);
         if (g.exe.isEmpty())
-            g.exe = QFileInfo(base + QStringLiteral("/exe")).symLinkTarget();
-        if (g.cmdline.isEmpty())
-            g.cmdline = QString::fromLocal8Bit(cmd).simplified();
+            g.exe = exe;
+        if (!kernel) {
+            const QString cmdline = argv.join(QLatin1Char(' '));
+            ProcInstance &in = g.instances[cmdline];
+            in.argv = argv;
+            in.cmdline = cmdline;
+            in.pids << pid;
+            addUnique(in.users, user);
+        }
     }
 
     m_list->setSortingEnabled(false);
     m_list->clear();
     for (const ProcGroup &g : groups) {
         auto *it = new QTreeWidgetItem;
-        it->setText(ColName, g.comm);
+        it->setText(ColName, g.name);
+        it->setData(ColName, NameRole, g.name);
+        it->setData(ColName, SpecificRole, false);
         it->setData(ColCount, Qt::DisplayRole, g.pids.size());
         it->setText(ColUser, g.users.join(QStringLiteral(", ")));
-        it->setText(ColRule, m_existing ? m_existing(g.comm) : QString());
+        it->setText(ColRule, m_describe ? m_describe(g.name, nullptr) : QString());
         it->setText(ColExe, g.exe);
-        it->setText(ColCmd, g.cmdline);
+        const QString firstCmd = g.instances.isEmpty() ? QString() : g.instances.first().cmdline.simplified();
+        it->setText(ColCmd, g.instances.size() > 1
+                                ? tr("%n different command lines (unfold)", nullptr, int(g.instances.size()))
+                                : firstCmd);
         it->setToolTip(ColName, tr("PIDs: %1").arg(g.pids.join(QStringLiteral(", "))));
-        it->setToolTip(ColCmd, g.cmdline);
+        it->setToolTip(ColCmd, g.instances.size() > 1 ? QString() : firstCmd);
+        if (m_ananicyCpp) {
+            for (const ProcInstance &in : g.instances) {
+                auto *child = new QTreeWidgetItem(it);
+                child->setData(ColName, NameRole, g.name);
+                child->setData(ColName, SpecificRole, true);
+                child->setData(ColName, ArgvRole, in.argv);
+                child->setText(ColName, tr("only this command line"));
+                child->setData(ColCount, Qt::DisplayRole, in.pids.size());
+                child->setText(ColUser, in.users.join(QStringLiteral(", ")));
+                child->setText(ColRule, m_describe ? m_describe(g.name, &in.cmdline) : QString());
+                child->setText(ColCmd, in.cmdline.simplified());
+                child->setToolTip(ColCmd, in.cmdline);
+                child->setToolTip(ColName, tr("PIDs: %1").arg(in.pids.join(QStringLiteral(", "))));
+            }
+        }
         m_list->addTopLevelItem(it);
     }
     m_list->setSortingEnabled(true);
@@ -158,21 +222,50 @@ void ProcessDialog::reload()
 void ProcessDialog::applyFilter()
 {
     const QString f = m_filter->text().trimmed();
+    auto textMatch = [&](const QTreeWidgetItem *it) {
+        return f.isEmpty() || it->text(ColName).contains(f, Qt::CaseInsensitive)
+               || it->text(ColExe).contains(f, Qt::CaseInsensitive)
+               || it->text(ColCmd).contains(f, Qt::CaseInsensitive);
+    };
     QTreeWidgetItem *firstVisible = nullptr;
     for (int i = 0; i < m_list->topLevelItemCount(); ++i) {
         QTreeWidgetItem *it = m_list->topLevelItem(i);
-        bool show = f.isEmpty() || it->text(ColName).contains(f, Qt::CaseInsensitive)
-                    || it->text(ColExe).contains(f, Qt::CaseInsensitive)
-                    || it->text(ColCmd).contains(f, Qt::CaseInsensitive);
-        if (m_hideRuled->isChecked() && !it->text(ColRule).isEmpty())
+        const bool groupMatch = textMatch(it);
+        bool anyChild = false;
+        for (int c = 0; c < it->childCount(); ++c) {
+            QTreeWidgetItem *ch = it->child(c);
+            bool show = groupMatch || textMatch(ch);
+            if (m_hideRuled->isChecked() && !ch->text(ColRule).isEmpty())
+                show = false;
+            ch->setHidden(!show);
+            anyChild = anyChild || show;
+        }
+        bool show = groupMatch || anyChild;
+        if (m_hideRuled->isChecked() && !it->text(ColRule).isEmpty() && !anyChild)
             show = false;
         it->setHidden(!show);
+        // a filter that only matches a command line unfolds its name
+        it->setExpanded(show && !groupMatch && anyChild && !f.isEmpty());
         if (show && !firstVisible)
             firstVisible = it;
     }
     QTreeWidgetItem *cur = m_list->currentItem();
-    if ((!cur || cur->isHidden()) && firstVisible)
+    if ((!cur || cur->isHidden() || (cur->parent() && cur->parent()->isHidden())) && firstVisible)
         m_list->setCurrentItem(firstVisible);
+    updateOkButton();
+}
+
+void ProcessDialog::updateOkButton()
+{
+    const QTreeWidgetItem *it = m_list->currentItem();
+    if (!m_ok)
+        return;
+    if (it && it->data(ColName, SpecificRole).toBool())
+        m_ok->setText(tr("Create rule for this command line"));
+    else if (it && m_ananicyCpp)
+        m_ok->setText(tr("Create rule for all \"%1\" processes").arg(it->data(ColName, NameRole).toString()));
+    else
+        m_ok->setText(tr("Create rule"));
 }
 
 void ProcessDialog::accept()
@@ -180,6 +273,8 @@ void ProcessDialog::accept()
     QTreeWidgetItem *it = m_list->currentItem();
     if (!it || it->isHidden())
         return;
-    m_selected = it->text(ColName);
+    m_sel.name = it->data(ColName, NameRole).toString();
+    m_sel.specific = it->data(ColName, SpecificRole).toBool();
+    m_sel.argv = it->data(ColName, ArgvRole).toStringList();
     QDialog::accept();
 }

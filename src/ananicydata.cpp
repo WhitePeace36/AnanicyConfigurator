@@ -1,4 +1,5 @@
 #include "ananicydata.h"
+#include "rulematch.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -267,7 +268,9 @@ void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recur
                     recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
     while (it.hasNext())
         paths << it.next();
-    paths.sort(); // ananicy loads in alphabetical order
+    // ananicy-cpp loads files in std::filesystem::path order: component by component, so
+    // "a/x.rules" comes before "a-b/x.rules" (a plain string sort puts '-' before '/').
+    std::sort(paths.begin(), paths.end(), rulematch::pathLess);
     for (const QString &p : paths)
         loadFile(p);
 }
@@ -351,7 +354,7 @@ void EntryStore::sortByLoadOrder()
     std::stable_sort(m_entries.begin(), m_entries.end(), [&](const EntryPtr &a, const EntryPtr &b) {
         const QString pa = a->file ? a->file->path : QString();
         const QString pb = b->file ? b->file->path : QString();
-        if (const int c = QString::compare(pa, pb))
+        if (const int c = rulematch::pathCompare(pa, pb))
             return c < 0;
         return lineOf.value(a.get()) < lineOf.value(b.get());
     });

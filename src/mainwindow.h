@@ -2,6 +2,7 @@
 
 #include "ananicydata.h"
 #include "fieldspecs.h"
+#include "rulematch.h"
 
 #include <QMainWindow>
 #include <QMap>
@@ -40,6 +41,9 @@ private:
     void typeNamesChanged();
     QString describeType(const QString &name) const;
     QString detectService() const;
+    // Whether the selected daemon understands "cmdline_contains" (ananicy-cpp built with it).
+    void updateCmdlineSupport();
+    QString cmdlineUnsupportedNote() const;
 
     // saving
     bool saveAll(bool restart);
@@ -64,13 +68,14 @@ private:
     void addRule();
     void addRuleFromProcess();
     void editRule();
-    void createRule(const QString &name);
+    // needles: texts for cmdline_contains (empty for a rule that applies to every process)
+    void createRule(const QString &name, const QStringList &needles = {});
     void deleteRules();
     void reorganizeRules();
     void removeDuplicateRules();
     QString ruleFileFor(const QString &type) const; // 99-rules/<type>.rules or 99-rules/custom.rules
     void placeNewRule(const EntryPtr &e);           // unsaved rules follow their type's file (then sortByLoadOrder())
-    void openRuleDialog(const EntryPtr &original, const QString &newName);
+    void openRuleDialog(const EntryPtr &original, const QString &newName, const QStringList &newNeedles = {});
     void refreshRuleTypeFilter();
     void applyRuleTypeFilter();
     void updateRuleCount();
@@ -89,7 +94,9 @@ private:
     EntryStore m_cgroups{QStringLiteral("cgroup"), {QStringLiteral("cgroup")}};
     MainConf m_conf;
     QMap<QString, int> m_usage;
-    QHash<QString, int> m_nameCount; // rules per process name (duplicates > 1)
+    rulematch::Analysis m_ruleAnalysis; // duplicates / unreachable rules, recomputed with the usage
+    bool m_cmdlineSupported = true;     // daemon supports cmdline_contains
+    bool m_isAnanicyCpp = true;         // selected service is ananicy-cpp (matches argv[0], not comm)
 
     EntryModel *m_typeModel = nullptr;
     EntryModel *m_ruleModel = nullptr;
