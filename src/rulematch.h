@@ -1,7 +1,7 @@
 #pragma once
 
 // How ananicy-cpp picks a rule for a process, including "cmdline_contains"
-// (github.com/WhitePeace36/ananicy-cpp). Kept free of GUI code so it can be tested.
+// (github.com/WhitePeace36/ananicy-cpp-lunar). Kept free of GUI code so it can be tested.
 //
 //   * A rule without cmdline_contains is a plain rule. If several plain rules have the same
 //     name, the one loaded last wins.

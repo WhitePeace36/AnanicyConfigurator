@@ -776,7 +776,7 @@ QString MainWindow::cmdlineUnsupportedNote() const
     const QString daemon = m_isAnanicyCpp ? tr("The installed ananicy-cpp") : tr("Ananicy");
     return tr("%1 does not support \"command line contains\" (cmdline_contains). It ignores the field, so this "
               "rule applies to every process with this name and replaces other rules for the same name. It needs "
-              "ananicy-cpp from github.com/WhitePeace36/ananicy-cpp.")
+              "ananicy-cpp from github.com/WhitePeace36/ananicy-cpp-lunar.")
         .arg(daemon);
 }
 

@@ -47,7 +47,7 @@
 ## Rules for one program (command line contains)
 
 Ananicy matches rules against the program name, so every Java program is `java` and every Python
-script is `python3`. [ananicy-cpp from WhitePeace36/ananicy-cpp](https://github.com/WhitePeace36/ananicy-cpp)
+script is `python3`. [ananicy-cpp from WhitePeace36/ananicy-cpp-lunar](https://github.com/WhitePeace36/ananicy-cpp-lunar)
 adds `cmdline_contains` to tell them apart. In the rule dialog it is the **Command line contains**
 field:
 
@@ -90,7 +90,7 @@ with that name and replace other rules for that name.
 ## Packaged rules (`/usr/share/ananicy.d`)
 
 A distribution package can install its rules, types and `ananicy.conf` to `/usr/share/ananicy.d`.
-ananicy-cpp from [WhitePeace36/ananicy-cpp](https://github.com/WhitePeace36/ananicy-cpp) (1.4.0 or
+ananicy-cpp from [WhitePeace36/ananicy-cpp-lunar](https://github.com/WhitePeace36/ananicy-cpp-lunar) (1.4.0 or
 newer) loads that folder first and `/etc/ananicy.d` after it, so whatever is defined in
 `/etc/ananicy.d` replaces the packaged definition. Package updates replace `/usr/share/ananicy.d`
 completely and never touch your changes.
