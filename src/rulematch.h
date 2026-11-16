@@ -8,7 +8,10 @@
 //   * A rule with cmdline_contains only applies when every text in it occurs in the process's
 //     command line (the arguments joined by spaces, case-sensitive). Such rules are tried in
 //     load order before the plain rule for that name, and the first one that matches wins.
-//     They never replace each other or the plain rule.
+//     A later one with the same texts (in any order) replaces an earlier one as if that had
+//     never been loaded; rules with other texts never replace each other or the plain rule.
+//   * Packaged rules (/usr/share/ananicy.d) load before /etc/ananicy.d, so a rule there with
+//     the same identity (ruleKey()) overrides the packaged one. Such pairs are not duplicates.
 
 #include "ananicydata.h"
 
@@ -39,26 +42,35 @@ QString needlesText(const Entry &e);
 // true if `cmdline` contains every text.
 bool matches(const QStringList &needles, const QString &cmdline);
 
+// What makes two rules the same rule for ananicy-cpp (a later one replaces the earlier one):
+// the name, and for cmdline rules the set of texts (order and repeats do not matter).
+QString ruleKey(const Entry &e);
+
 // true if the earlier cmdline rule matches whenever the later one does (same name, and every
 // text of the earlier rule occurs inside one of the later rule's texts), so the later rule
-// can never be used. Identical rules are the simplest case.
+// can never be used. Rules with the same texts do not shadow each other: the later one replaces
+// the earlier one instead (see ruleKey()).
 bool shadows(const Entry &earlier, const Entry &later);
 
 // Rule that ananicy-cpp applies to a process. `rules` must be in load order.
 EntryPtr match(const QVector<EntryPtr> &rules, const QString &name, const QString &cmdline);
 
 // Problems in a rule list (load order): plain rules with the same name, cmdline rules that can
-// never match, invalid cmdline_contains values. Keyed by entry.
+// never match or are replaced, invalid cmdline_contains values. Keyed by entry. Only rules
+// outside the packaged directory get problems, and a packaged rule overridden by one in
+// /etc/ananicy.d is not a duplicate.
 struct Analysis {
     QHash<const Entry *, QString> problem;
-    QHash<QString, int> plainCount;            // plain rules per name
+    QHash<QString, int> plainCount;            // plain rules per name, not counting packaged ones
     QHash<const Entry *, EntryPtr> shadowedBy; // unreachable cmdline rule -> rule that wins
+    QHash<const Entry *, EntryPtr> replacedBy; // rule -> later rule with the same ruleKey()
     int duplicatePlainNames() const;           // names with more than one plain rule
 };
 Analysis analyze(const QVector<EntryPtr> &rules);
 
-// Rules that "Remove duplicates" can delete without changing what ananicy-cpp does: every plain
-// rule except the last one per name, and every cmdline rule that can never match.
+// Rules that "Remove duplicates" can delete without changing what ananicy-cpp does: every rule
+// that a later one with the same ruleKey() replaces, and every cmdline rule that can never match.
+// Packaged rules are never included.
 QVector<EntryPtr> removableDuplicates(const QVector<EntryPtr> &rules);
 
 // Names whose cmdline rules end up in a different order (and may pick a different winner) when

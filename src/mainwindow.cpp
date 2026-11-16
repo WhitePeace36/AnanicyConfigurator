@@ -46,7 +46,7 @@ namespace {
 
 const char *kNotSet = "(not set)";
 
-enum RuleCol { RColName, RColCmdline, RColType, RColOverrides, RColFile };
+enum RuleCol { RColName, RColCmdline, RColType, RColOverrides, RColSource, RColFile };
 
 QString shellQuote(const QString &s)
 {
@@ -100,9 +100,14 @@ QTableView *makeTable()
 
 // =====================================================================  construction
 
-MainWindow::MainWindow(const QString &rootDir, QWidget *parent)
+MainWindow::MainWindow(const QString &rootDir, const QString &packagedDir, QWidget *parent)
     : QMainWindow(parent), m_root(QDir(rootDir).absolutePath())
 {
+    if (!packagedDir.isEmpty()) {
+        const QString p = QDir::cleanPath(QDir(packagedDir).absolutePath());
+        if (QFileInfo(p).isDir() && p != QDir::cleanPath(m_root))
+            m_packagedRoot = p;
+    }
     m_rulesDir = m_root + QStringLiteral("/99-rules");
     m_newTypesFile = m_root + QStringLiteral("/99-types.types");
 
@@ -153,16 +158,23 @@ QWidget *MainWindow::buildTypesPane()
     }
     cols.append({tr("Rules"), [this](const Entry &e) { return m_usage.value(e.str(QStringLiteral("type")), 0); },
                  [](const Entry &) { return tr("Number of rules using this type (double-click to show them)"); }});
-    cols.append({tr("File"), [this](const Entry &e) { return e.file ? m_typeModel->relPath(e.file->path) : QString(); },
+    cols.append({tr("Source"), [this](const Entry &e) { return sourceText(m_types, e); },
+                 [this](const Entry &e) { return sourceTip(m_types, e); }});
+    cols.append({tr("File"), [this](const Entry &e) { return displayPath(e); },
                  [](const Entry &e) { return e.file ? e.file->path : QString(); }});
     m_typeModel->setColumns(cols);
+    m_typeModel->setHiddenFn([this](const Entry &e) { return isHidden(m_types, e); });
+    m_typeModel->setRefreshFn([this] { recomputeLayers(); });
+    const int typeSourceCol = cols.size() - 2;
     m_typeModel->setWarnFn([this](const Entry &e) {
+        if (isPackaged(e))
+            return QString(); // the package's business, and never written
         const QString n = e.str(QStringLiteral("type"));
         if (n.isEmpty())
             return tr("Type name is empty");
-        int c = 0;
+        int c = 0; // copies in the config directory; one there overriding a packaged type is fine
         for (const auto &o : m_types.entries())
-            if (o->str(QStringLiteral("type")) == n)
+            if (!isPackaged(*o) && o->str(QStringLiteral("type")) == n)
                 ++c;
         return c > 1 ? tr("Type \"%1\" is defined %2 times; the last one wins").arg(n).arg(c) : QString();
     });
@@ -172,6 +184,7 @@ QWidget *MainWindow::buildTypesPane()
     m_typeView = makeTable();
     m_typeView->setSelectionMode(QAbstractItemView::SingleSelection);
     m_typeView->setModel(m_typeProxy);
+    m_typeView->setColumnHidden(typeSourceCol, m_packagedRoot.isEmpty());
     new ColumnFitter(m_typeView);
     m_typeView->sortByColumn(0, Qt::AscendingOrder);
     left->addWidget(m_typeView, 1);
@@ -181,6 +194,10 @@ QWidget *MainWindow::buildTypesPane()
     auto *edit = new QPushButton(tr("Edit…"));
     auto *dup = new QPushButton(tr("Duplicate…"));
     auto *del = new QPushButton(tr("Delete"));
+    auto *resetType = new QPushButton(tr("Reset to packaged"));
+    resetType->setToolTip(tr("Remove your changes to a packaged type, so the package's version applies again"));
+    if (m_packagedRoot.isEmpty())
+        resetType->hide();
     auto *reorgTypes = new QPushButton(tr("Move all into 99-types.types"));
     reorgTypes->setToolTip(tr("Move every type into %1").arg(m_newTypesFile));
     auto *show = new QPushButton(tr("Show its rules"));
@@ -189,6 +206,7 @@ QWidget *MainWindow::buildTypesPane()
     btns->addWidget(edit);
     btns->addWidget(dup);
     btns->addWidget(del);
+    btns->addWidget(resetType);
     btns->addWidget(show);
     btns->addSpacing(16);
     btns->addWidget(reorgTypes);
@@ -202,6 +220,7 @@ QWidget *MainWindow::buildTypesPane()
     connect(edit, &QPushButton::clicked, this, &MainWindow::editType);
     connect(dup, &QPushButton::clicked, this, &MainWindow::duplicateType);
     connect(del, &QPushButton::clicked, this, &MainWindow::deleteType);
+    connect(resetType, &QPushButton::clicked, this, &MainWindow::resetType);
     connect(show, &QPushButton::clicked, this, &MainWindow::showRulesOfType);
     connect(reorgTypes, &QPushButton::clicked, this, &MainWindow::reorganizeTypes);
     connect(m_typeView, &QTableView::activated, this, &MainWindow::editType); // double-click / Enter
@@ -254,10 +273,16 @@ QWidget *MainWindow::buildRulesPane()
              return parts.join(QStringLiteral(", "));
          },
          {}},
-        {tr("File"), [this](const Entry &e) { return e.file ? m_ruleModel->relPath(e.file->path) : QString(); },
+        {tr("Source"), [this](const Entry &e) { return sourceText(m_rules, e); },
+         [this](const Entry &e) { return sourceTip(m_rules, e); }},
+        {tr("File"), [this](const Entry &e) { return displayPath(e); },
          [](const Entry &e) { return e.file ? e.file->path : QString(); }},
     });
+    m_ruleModel->setHiddenFn([this](const Entry &e) { return isHidden(m_rules, e); });
+    m_ruleModel->setRefreshFn([this] { recomputeLayers(); });
     m_ruleModel->setWarnFn([this](const Entry &e) {
+        if (isPackaged(e))
+            return QString(); // the package's business, and never written
         if (e.str(QStringLiteral("name")).isEmpty())
             return tr("Process name is empty");
         const QString t = e.str(QStringLiteral("type"));
@@ -276,6 +301,7 @@ QWidget *MainWindow::buildRulesPane()
     m_ruleView = makeTable();
     m_ruleView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ruleView->setModel(m_ruleProxy);
+    m_ruleView->setColumnHidden(RColSource, m_packagedRoot.isEmpty());
     new ColumnFitter(m_ruleView);
     m_ruleView->sortByColumn(RColName, Qt::AscendingOrder);
     left->addWidget(m_ruleView, 1);
@@ -285,6 +311,10 @@ QWidget *MainWindow::buildRulesPane()
     auto *addProc = new QPushButton(tr("Add from running process…"));
     auto *edit = new QPushButton(tr("Edit…"));
     auto *del = new QPushButton(tr("Delete"));
+    auto *resetRule = new QPushButton(tr("Reset to packaged"));
+    resetRule->setToolTip(tr("Remove your changes to the selected packaged rules, so the package's version applies again"));
+    if (m_packagedRoot.isEmpty())
+        resetRule->hide();
     auto *reorg = new QPushButton(tr("Reorganize into 99-rules/…"));
     reorg->setToolTip(tr("Move every rule into %1/<type>.rules (rules without a type: custom.rules)")
                           .arg(QDir(m_root).relativeFilePath(m_rulesDir)));
@@ -295,6 +325,7 @@ QWidget *MainWindow::buildRulesPane()
     btns->addWidget(addProc);
     btns->addWidget(edit);
     btns->addWidget(del);
+    btns->addWidget(resetRule);
     btns->addSpacing(16);
     btns->addWidget(reorg);
     btns->addWidget(dedup);
@@ -322,6 +353,7 @@ QWidget *MainWindow::buildRulesPane()
         m_ruleTypeFilter->setCurrentIndex(0);
     });
     connect(del, &QPushButton::clicked, this, &MainWindow::deleteRules);
+    connect(resetRule, &QPushButton::clicked, this, &MainWindow::resetRules);
     connect(m_ruleView, &QTableView::activated, this, &MainWindow::editRule); // double-click / Enter
     auto *sc = new QShortcut(QKeySequence::Delete, m_ruleView);
     sc->setContext(Qt::WidgetShortcut);
@@ -428,6 +460,11 @@ QWidget *MainWindow::buildBottomBar()
     h->setContentsMargins(0, 0, 0, 0);
 
     auto *rootLbl = new QLabel(tr("Config directory: <b>%1</b>").arg(m_root.toHtmlEscaped()));
+    if (!m_packagedRoot.isEmpty()) {
+        rootLbl->setText(rootLbl->text() + tr(" · packaged (read-only): <b>%1</b>").arg(m_packagedRoot.toHtmlEscaped()));
+        rootLbl->setToolTip(tr("The packaged rules are loaded first. Your changes are saved in %1 and override them; "
+                               "package updates never touch them.").arg(m_root));
+    }
     h->addWidget(rootLbl);
     h->addStretch(1);
 
@@ -472,6 +509,14 @@ void MainWindow::loadAll()
     m_rules.clear();
     m_cgroups.clear();
 
+    if (!m_packagedRoot.isEmpty()) { // first: ananicy-cpp loads them before the config directory
+        m_types.loadTree(m_packagedRoot, QStringLiteral("*.types"), true, true);
+        m_rules.loadTree(m_packagedRoot, QStringLiteral("*.rules"), true, true);
+        m_cgroups.loadTree(m_packagedRoot, QStringLiteral("*.cgroups"), true, true);
+        m_packagedConf.load(m_packagedRoot + QStringLiteral("/ananicy.conf"));
+    } else {
+        m_packagedConf = MainConf();
+    }
     m_types.loadTree(m_root, QStringLiteral("*.types"), true);
     m_rules.loadTree(m_root, QStringLiteral("*.rules"), true);
     m_cgroups.loadTree(m_root, QStringLiteral("*.cgroups"), true);
@@ -486,7 +531,7 @@ void MainWindow::loadAll()
     refreshConfTab();
 
     QStringList warnings = m_types.warnings + m_rules.warnings + m_cgroups.warnings;
-    if (!QFileInfo(m_root).isDir())
+    if (!QFileInfo(m_root).isDir() && m_packagedRoot.isEmpty()) // with packaged rules it is created on save
         warnings.prepend(tr("%1 does not exist").arg(m_root));
     if (warnings.isEmpty()) {
         m_warnLabel->clear();
@@ -498,15 +543,20 @@ void MainWindow::loadAll()
     }
 
     QSet<ConfFile *> files;
-    for (const auto &e : m_rules.entries())
+    int packaged = 0;
+    for (const auto &e : m_rules.entries()) {
         files.insert(e->file);
+        packaged += isPackaged(*e) ? 1 : 0;
+    }
     for (const auto &e : m_types.entries())
         files.insert(e->file);
-    statusBar()->showMessage(tr("Loaded %1 types and %2 rules from %3 files")
-                                 .arg(m_types.entries().size())
-                                 .arg(m_rules.entries().size())
-                                 .arg(files.size()),
-                             8000);
+    QString loaded = tr("Loaded %1 types and %2 rules from %3 files")
+                         .arg(m_types.entries().size())
+                         .arg(m_rules.entries().size())
+                         .arg(files.size());
+    if (!m_packagedRoot.isEmpty())
+        loaded += tr(" (%n packaged rule(s))", nullptr, packaged);
+    statusBar()->showMessage(loaded, 8000);
     if (m_typeProxy->rowCount() > 0)
         m_typeView->setCurrentIndex(m_typeProxy->index(0, 0));
     if (m_ruleProxy->rowCount() > 0)
@@ -536,13 +586,150 @@ void MainWindow::updateDirtyState()
 
 void MainWindow::recomputeUsage()
 {
+    recomputeLayers();
     m_usage.clear();
     m_ruleAnalysis = rulematch::analyze(m_rules.entries()); // entries() is in load order
     for (const auto &r : m_rules.entries()) {
+        if (isHidden(m_rules, *r))
+            continue; // a packaged rule replaced by one in the config directory
         const QString t = r->str(QStringLiteral("type"));
         if (!t.isEmpty())
             m_usage[t]++;
     }
+}
+
+// =====================================================================  packaged layer
+
+QString MainWindow::entryKey(const EntryStore &store, const Entry &e) const
+{
+    return &store == &m_rules ? rulematch::ruleKey(e) : e.str(store.primaryKey());
+}
+
+void MainWindow::recomputeLayers()
+{
+    auto fill = [this](const EntryStore &store, Layers &l) {
+        l.last.clear();
+        l.lastPackaged.clear();
+        for (const auto &e : store.entries()) { // load order: the last one per key is used
+            const QString k = entryKey(store, *e);
+            l.last.insert(k, e);
+            if (isPackaged(*e))
+                l.lastPackaged.insert(k, e);
+        }
+    };
+    fill(m_types, m_typeLayers);
+    fill(m_rules, m_ruleLayers);
+}
+
+const MainWindow::Layers &MainWindow::layersOf(const EntryStore &store) const
+{
+    return &store == &m_rules ? m_ruleLayers : m_typeLayers;
+}
+
+EntryPtr MainWindow::packagedOf(const EntryStore &store, const Entry &e) const
+{
+    if (isPackaged(e))
+        return nullptr;
+    return layersOf(store).lastPackaged.value(entryKey(store, e));
+}
+
+bool MainWindow::isHidden(const EntryStore &store, const Entry &e) const
+{
+    if (!isPackaged(e))
+        return false;
+    const EntryPtr last = layersOf(store).last.value(entryKey(store, e));
+    return last && last.get() != &e;
+}
+
+QVector<QPair<QString, QJsonValue>> MainWindow::offFields(const EntryStore &store, const Entry &e) const
+{
+    // Only what identifies the entry: it then replaces the packaged one and sets nothing.
+    QVector<QPair<QString, QJsonValue>> f{{store.primaryKey(), e.value(store.primaryKey())}};
+    if (&store == &m_rules && rulematch::hasCmdline(e))
+        f.append({rulematch::kCmdlineKey, e.value(rulematch::kCmdlineKey)});
+    return f;
+}
+
+MainWindow::Source MainWindow::sourceOf(const EntryStore &store, const Entry &e) const
+{
+    if (isPackaged(e))
+        return Source::Packaged;
+    if (!packagedOf(store, e))
+        return Source::Own;
+    return e.fields.size() == offFields(store, e).size() ? Source::Off : Source::Changed;
+}
+
+QString MainWindow::sourceText(const EntryStore &store, const Entry &e) const
+{
+    switch (sourceOf(store, e)) {
+    case Source::Packaged:
+        return tr("Packaged");
+    case Source::Changed:
+        return tr("Changed");
+    case Source::Off:
+        return tr("Off");
+    case Source::Own:
+        break;
+    }
+    return tr("Yours");
+}
+
+QString MainWindow::sourceTip(const EntryStore &store, const Entry &e) const
+{
+    const QString file = e.file ? e.file->path : QString();
+    switch (sourceOf(store, e)) {
+    case Source::Packaged:
+        return tr("From the package (%1), read-only. Editing it saves your version to %2, which package updates "
+                  "never touch.").arg(file, overridePath(e.file));
+    case Source::Changed:
+        return tr("Your version in %1 replaces the packaged one:\n%2")
+            .arg(file, packagedOf(store, e)->originalLine.trimmed());
+    case Source::Off:
+        return tr("Switched off: this entry in %1 has no settings and replaces the packaged one:\n%2\n"
+                  "Use \"Reset to packaged\" to use it again.").arg(file, packagedOf(store, e)->originalLine.trimmed());
+    case Source::Own:
+        break;
+    }
+    return tr("Only in %1").arg(m_root);
+}
+
+QString MainWindow::overridePath(const ConfFile *packagedFile) const
+{
+    if (!packagedFile || m_packagedRoot.isEmpty())
+        return QString();
+    return QDir::cleanPath(m_root + QLatin1Char('/') + QDir(m_packagedRoot).relativeFilePath(packagedFile->path));
+}
+
+QString MainWindow::displayPath(const Entry &e) const
+{
+    if (!e.file)
+        return QString();
+    return QDir(isPackaged(e) ? m_packagedRoot : m_root).relativeFilePath(e.file->path);
+}
+
+EntryPtr MainWindow::addOverride(EntryStore &store, const EntryPtr &packaged,
+                                 const QVector<QPair<QString, QJsonValue>> &fields)
+{
+    EntryPtr e = store.add(overridePath(packaged->file), packaged->str(store.primaryKey()));
+    e->fields = fields;
+    return e;
+}
+
+int MainWindow::resetEntries(EntryStore &store, const QVector<EntryPtr> &sel)
+{
+    QSet<QString> keys;
+    for (const auto &e : sel)
+        if (sourceOf(store, *e) == Source::Changed || sourceOf(store, *e) == Source::Off)
+            keys.insert(entryKey(store, *e));
+    int n = 0;
+    const QVector<EntryPtr> all = store.entries();
+    for (const auto &e : all) {
+        if (!isPackaged(*e) && keys.contains(entryKey(store, *e))) {
+            store.remove(e);
+            ++n;
+        }
+    }
+    return n;
 }
 
 void MainWindow::typeNamesChanged()
@@ -622,6 +809,8 @@ bool MainWindow::saveAll(bool restart)
     QStringList errors;
     QSet<QString> seen;
     for (const auto &t : m_types.entries()) {
+        if (isPackaged(*t))
+            continue; // never written; an override of it in the config directory is not a duplicate
         const QString n = t->str(QStringLiteral("type"));
         if (n.isEmpty())
             errors << tr("A type has an empty name (%1)").arg(t->file ? t->file->path : QString());
@@ -636,6 +825,8 @@ bool MainWindow::saveAll(bool restart)
     }
     QStringList missing;
     for (const auto &r : m_rules.entries()) {
+        if (isPackaged(*r))
+            continue;
         if (r->str(QStringLiteral("name")).isEmpty())
             errors << tr("A rule has an empty process name (%1)").arg(r->file ? r->file->path : QString());
         const QString t = r->str(QStringLiteral("type"));
@@ -989,7 +1180,10 @@ void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
                              : templ ? tr("Duplicate type \"%1\"").arg(templ->str(QStringLiteral("type")))
                                      : tr("New type"),
                     work, this);
-    dlg.editor()->setFileHint(tr("%1 (new)").arg(m_newTypesFile));
+    if (original && isPackaged(*original))
+        dlg.editor()->setFileHint(tr("%1 (your version, replaces the packaged type)").arg(overridePath(original->file)));
+    else
+        dlg.editor()->setFileHint(tr("%1 (new)").arg(m_newTypesFile));
     dlg.editor()->setCgroupNames(m_cgroups.names());
     dlg.setValidator([this, original](const Entry &e, QWidget *parent) {
         const QString n = e.str(QStringLiteral("type"));
@@ -1017,6 +1211,17 @@ void MainWindow::openTypeDialog(const EntryPtr &original, const EntryPtr &templ)
         target = m_types.add(m_newTypesFile, newName);
         target->fields = work->fields;
         m_typeFilter->clear();
+        m_typeModel->reset();
+    } else if (isPackaged(*original)) {
+        // never changed in place: same name -> override in the config directory, else a new type
+        if (original->fields == work->fields)
+            return;
+        if (newName == original->str(QStringLiteral("type"))) {
+            target = addOverride(m_types, original, work->fields);
+        } else {
+            target = m_types.add(m_newTypesFile, newName);
+            target->fields = work->fields;
+        }
         m_typeModel->reset();
     } else {
         if (original->fields == work->fields)
@@ -1061,6 +1266,35 @@ void MainWindow::deleteType()
         return;
     const QString name = e->str(QStringLiteral("type"));
     const int used = m_usage.value(name, 0);
+    const Source src = sourceOf(m_types, *e);
+    if (src == Source::Off) {
+        statusBar()->showMessage(tr("Type \"%1\" is already switched off. \"Reset to packaged\" uses the package's "
+                                    "version again.").arg(name), 10000);
+        return;
+    }
+    if (src == Source::Packaged || src == Source::Changed) {
+        // A packaged type cannot be deleted: an entry without settings switches it off.
+        QString q = tr("Switch off the packaged type \"%1\"?\n\nAn entry without settings is saved in %2 and replaces "
+                       "the package's version. \"Reset to packaged\" undoes this.")
+                        .arg(name, src == Source::Packaged ? overridePath(e->file) : e->file->path);
+        if (used > 0)
+            q += QLatin1String("\n\n") + tr("%n rule(s) use this type and then get no settings from it.", nullptr, used);
+        if (QMessageBox::question(this, tr("Switch off type"), q) != QMessageBox::Yes)
+            return;
+        EntryPtr target = e;
+        if (src == Source::Packaged) {
+            target = addOverride(m_types, e, offFields(m_types, *e));
+        } else {
+            e->fields = offFields(m_types, *e);
+            m_types.markModified(e);
+        }
+        m_typeModel->reset();
+        recomputeUsage();
+        m_ruleModel->allChanged();
+        selectType(target);
+        updateDirtyState();
+        return;
+    }
     QString q = tr("Delete type \"%1\" from %2?").arg(name, e->file ? e->file->path : QString());
     if (used > 0)
         q += QLatin1String("\n\n") + tr("%n rule(s) use this type and will reference an undefined type.", nullptr, used);
@@ -1074,6 +1308,26 @@ void MainWindow::deleteType()
     if (m_typeProxy->rowCount() > 0)
         m_typeView->setCurrentIndex(m_typeProxy->index(qMin(row, m_typeProxy->rowCount() - 1), 0));
     updateDirtyState();
+}
+
+void MainWindow::resetType()
+{
+    EntryPtr e = currentType();
+    if (!e)
+        return;
+    const QString name = e->str(QStringLiteral("type"));
+    if (resetEntries(m_types, {e}) == 0) {
+        statusBar()->showMessage(tr("Type \"%1\" is not a changed packaged type.").arg(name), 8000);
+        return;
+    }
+    m_typeModel->reset();
+    recomputeUsage();
+    typeNamesChanged();
+    m_ruleModel->allChanged();
+    selectType(m_types.find(name));
+    updateDirtyState();
+    statusBar()->showMessage(tr("Type \"%1\" uses the packaged version again. Press Save to write the change.").arg(name),
+                             10000);
 }
 
 // =====================================================================  rules
@@ -1160,7 +1414,7 @@ void MainWindow::addRuleFromProcess()
 }
 
 // The rule with the same name and the same command-line texts (order does not matter), i.e. the
-// one a new rule would compete with. Plain rules: the last one, which is the one that applies.
+// one a new rule would replace: the last one, which is the one that applies.
 static EntryPtr findSameRule(const QVector<EntryPtr> &rules, const QString &name, const QStringList &needles,
                              const Entry *except = nullptr)
 {
@@ -1172,8 +1426,6 @@ static EntryPtr findSameRule(const QVector<EntryPtr> &rules, const QString &name
         const QStringList n = rulematch::needles(*r);
         if (rulematch::hasCmdline(*r) != !needles.isEmpty() || QSet<QString>(n.begin(), n.end()) != want)
             continue;
-        if (!needles.isEmpty())
-            return r; // cmdline rules: the first one is the one that is used
         found = r;
     }
     return found;
@@ -1219,7 +1471,12 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
     EntryEditor *ed = dlg.editor();
     ed->setCmdlineSupport(m_cmdlineSupported, cmdlineUnsupportedNote());
     ed->setNameLengthLimited(!m_isAnanicyCpp);
-    ed->setFileHintFn([this](const Entry &e) {
+    ed->setFileHintFn([this, original](const Entry &e) {
+        if (original && isPackaged(*original)) {
+            if (rulematch::ruleKey(e) == rulematch::ruleKey(*original))
+                return tr("%1 (your version, replaces the packaged rule)").arg(overridePath(original->file));
+            return tr("%1 (new)").arg(ruleFileFor(e.str(QStringLiteral("type"))));
+        }
         if (e.file && !e.originalLine.isEmpty())
             return e.file->path; // saved rules stay where they are
         return tr("%1 (new)").arg(ruleFileFor(e.str(QStringLiteral("type"))));
@@ -1251,14 +1508,14 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
         if (original && key(*original) == key(e))
             return true;
         const EntryPtr other = findSameRule(m_rules.entries(), n, needles, original.get());
-        if (!other)
-            return true;
+        if (!other || isPackaged(*other))
+            return true; // a rule in the config directory replaces a packaged one: that is the point
         const QString where = other->file ? other->file->path : QString();
         const QString q = needles.isEmpty()
             ? tr("Another rule for \"%1\" already exists in %2.\nAnanicy will use whichever is loaded last. "
                  "Continue?").arg(n, where)
             : tr("Another rule for \"%1\" with the same command line texts already exists in %2.\n"
-                 "ananicy-cpp uses whichever is loaded first, the other one is never used. Continue?")
+                 "ananicy-cpp uses whichever is loaded last, the other one is never used. Continue?")
                   .arg(n, where);
         return QMessageBox::question(parent, tr("Rule"), q) == QMessageBox::Yes;
     });
@@ -1273,6 +1530,17 @@ void MainWindow::openRuleDialog(const EntryPtr &original, const QString &newName
     if (!original) {
         target = m_rules.add(ruleFileFor(work->str(QStringLiteral("type"))), work->str(QStringLiteral("name")));
         target->fields = work->fields;
+        m_ruleModel->reset();
+    } else if (isPackaged(*original)) {
+        // never changed in place: same rule -> override in the config directory, else a new rule
+        if (original->fields == work->fields)
+            return;
+        if (rulematch::ruleKey(*work) == rulematch::ruleKey(*original)) {
+            target = addOverride(m_rules, original, work->fields);
+        } else {
+            target = m_rules.add(ruleFileFor(work->str(QStringLiteral("type"))), work->str(QStringLiteral("name")));
+            target->fields = work->fields;
+        }
         m_ruleModel->reset();
     } else {
         if (original->fields == work->fields)
@@ -1301,21 +1569,77 @@ void MainWindow::deleteRules()
             sel << e;
     if (sel.isEmpty())
         return;
-    const QString q = sel.size() == 1
-        ? tr("Delete the rule for \"%1\" from %2?").arg(sel[0]->str(QStringLiteral("name")),
-                                                      sel[0]->file ? sel[0]->file->path : QString())
-        : tr("Delete %1 selected rules?").arg(sel.size());
+    // Own rules are removed; packaged ones cannot be: a rule without settings switches them off.
+    QVector<EntryPtr> own, switchOff;
+    for (const auto &e : sel) {
+        const Source src = sourceOf(m_rules, *e);
+        if (src == Source::Own)
+            own << e;
+        else if (src == Source::Packaged || src == Source::Changed)
+            switchOff << e;
+    }
+    if (own.isEmpty() && switchOff.isEmpty()) {
+        statusBar()->showMessage(tr("Already switched off. \"Reset to packaged\" uses the package's version again."),
+                                 10000);
+        return;
+    }
+    QString q;
+    if (switchOff.isEmpty()) {
+        q = own.size() == 1 ? tr("Delete the rule for \"%1\" from %2?").arg(own[0]->str(QStringLiteral("name")),
+                                                                          own[0]->file ? own[0]->file->path : QString())
+                            : tr("Delete %1 selected rules?").arg(own.size());
+    } else if (own.isEmpty() && switchOff.size() == 1) {
+        const EntryPtr &e = switchOff[0];
+        q = tr("Switch off the packaged rule for \"%1\"?\n\nA rule without settings is saved in %2 and replaces the "
+               "package's version. \"Reset to packaged\" undoes this.")
+                .arg(e->str(QStringLiteral("name")), isPackaged(*e) ? overridePath(e->file) : e->file->path);
+    } else {
+        q = tr("Delete %1 of your rules and switch off %2 packaged rules?\n\nPackaged rules are switched off by a rule "
+               "without settings in %3. \"Reset to packaged\" undoes this.")
+                .arg(own.size()).arg(switchOff.size()).arg(m_root);
+    }
     if (QMessageBox::question(this, tr("Delete rules"), q) != QMessageBox::Yes)
         return;
     const int row = m_ruleView->currentIndex().row();
-    for (const auto &e : sel)
+    for (const auto &e : own)
         m_rules.remove(e);
+    for (const auto &e : switchOff) {
+        if (isPackaged(*e)) {
+            addOverride(m_rules, e, offFields(m_rules, *e));
+        } else {
+            e->fields = offFields(m_rules, *e);
+            m_rules.markModified(e);
+        }
+    }
     m_ruleModel->reset();
     recomputeUsage();
     m_typeModel->allChanged();
     if (m_ruleProxy->rowCount() > 0)
         m_ruleView->setCurrentIndex(m_ruleProxy->index(qMin(row, m_ruleProxy->rowCount() - 1), 0));
     updateDirtyState();
+}
+
+void MainWindow::resetRules()
+{
+    QVector<EntryPtr> sel;
+    for (const QModelIndex &idx : m_ruleView->selectionModel()->selectedRows())
+        if (EntryPtr e = m_ruleModel->entryAt(m_ruleProxy->mapToSource(idx).row()))
+            sel << e;
+    if (sel.isEmpty())
+        if (EntryPtr e = currentRule())
+            sel << e;
+    const int n = resetEntries(m_rules, sel);
+    if (n == 0) {
+        statusBar()->showMessage(tr("None of the selected rules changes or switches off a packaged rule."), 8000);
+        return;
+    }
+    m_ruleModel->reset();
+    recomputeUsage();
+    m_typeModel->allChanged();
+    updateDirtyState();
+    statusBar()->showMessage(tr("%n rule(s) use the packaged version again. Press Save to write the change.", nullptr,
+                                sel.size()),
+                             10000);
 }
 
 void MainWindow::refreshRuleTypeFilter()
@@ -1359,13 +1683,22 @@ void MainWindow::refreshConfTab()
                             ? tr("File: <b>%1</b>").arg(m_conf.path.toHtmlEscaped())
                             : tr("File: <b>%1</b> (does not exist yet, will be created on save)")
                                   .arg(m_conf.path.toHtmlEscaped()));
+    if (m_packagedConf.existed)
+        m_confPath->setText(m_confPath->text()
+                            + tr("<br>Packaged defaults: <b>%1</b> (read-only). Only the settings you change are saved "
+                                 "in your file; they win over the packaged ones.").arg(m_packagedConf.path.toHtmlEscaped()));
     QStringList knownKeys;
     for (auto &p : m_confCombos) {
         const ConfSpec &s = p.first;
         QComboBox *c = p.second;
         knownKeys << s.key;
         c->clear();
-        c->addItem(s.numeric ? QString() : QString::fromLatin1(kNotSet));
+        // first item: nothing in the config file, so the packaged value (or ananicy's default) applies
+        const QString unsetText = m_packagedConf.has(s.key) ? tr("(packaged: %1)").arg(m_packagedConf.get(s.key))
+                                                            : QString::fromLatin1(kNotSet);
+        c->addItem(s.numeric ? QString() : unsetText);
+        if (s.numeric)
+            c->lineEdit()->setPlaceholderText(unsetText);
         c->addItems(s.options.isEmpty() ? QStringList{QStringLiteral("true"), QStringLiteral("false")} : s.options);
         if (!m_conf.has(s.key)) {
             c->setCurrentIndex(0);
@@ -1387,15 +1720,30 @@ void MainWindow::refreshConfTab()
     }
 
     m_confOther->setRowCount(0);
-    for (const QString &k : m_conf.keys()) {
+    QStringList otherKeys = m_conf.keys();
+    for (const QString &k : m_packagedConf.keys())
+        if (!otherKeys.contains(k))
+            otherKeys << k;
+    for (const QString &k : otherKeys) {
         if (knownKeys.contains(k))
             continue;
+        const bool packagedOnly = !m_conf.has(k);
         const int r = m_confOther->rowCount();
         m_confOther->insertRow(r);
         auto *ki = new QTableWidgetItem(k);
         ki->setFlags(ki->flags() & ~Qt::ItemIsEditable);
+        auto *vi = new QTableWidgetItem(packagedOnly ? m_packagedConf.get(k) : m_conf.get(k));
+        if (packagedOnly) {
+            QFont f = ki->font();
+            f.setItalic(true);
+            ki->setFont(f);
+            vi->setFont(f);
+            const QString tip = tr("Packaged value. Changing it saves your value in %1.").arg(m_conf.path);
+            ki->setToolTip(tip);
+            vi->setToolTip(tip);
+        }
         m_confOther->setItem(r, 0, ki);
-        m_confOther->setItem(r, 1, new QTableWidgetItem(m_conf.get(k)));
+        m_confOther->setItem(r, 1, vi);
     }
     m_confOther->resizeColumnToContents(0);
     m_confLoading = false;
@@ -1425,7 +1773,14 @@ void MainWindow::removeConfKey()
     const int r = m_confOther->currentRow();
     if (r < 0)
         return;
-    m_conf.unset(m_confOther->item(r, 0)->text());
+    const QString key = m_confOther->item(r, 0)->text();
+    if (!m_conf.has(key)) {
+        QMessageBox::information(this, tr("Remove key"),
+                                 tr("\"%1\" comes from the packaged %2 and cannot be removed there. Change its value to "
+                                    "override it.").arg(key, m_packagedConf.path));
+        return;
+    }
+    m_conf.unset(key); // a packaged value for it applies again
     refreshConfTab();
     updateDirtyState();
 }
@@ -1435,8 +1790,11 @@ void MainWindow::updateRuleCount()
     if (!m_ruleCount || !m_showAllRules)
         return;
     const bool filtered = !m_ruleFilter->text().trimmed().isEmpty() || m_ruleTypeFilter->currentIndex() > 0;
-    m_ruleCount->setText(filtered ? tr("showing %1 of %2").arg(m_ruleProxy->rowCount()).arg(m_rules.entries().size())
-                                  : tr("%1 rules").arg(m_rules.entries().size()));
+    int total = 0;
+    for (const auto &e : m_rules.entries())
+        total += isHidden(m_rules, *e) ? 0 : 1;
+    m_ruleCount->setText(filtered ? tr("showing %1 of %2").arg(m_ruleProxy->rowCount()).arg(total)
+                                  : tr("%1 rules").arg(total));
     m_showAllRules->setEnabled(filtered);
 }
 
@@ -1482,8 +1840,9 @@ void MainWindow::reorganizeRules()
 
     // Rules with "command line contains" are tried in load order and the first match wins, so
     // they must keep their order relative to each other.
-    const QStringList reordered = rulematch::cmdlineOrderChanges(
-        m_rules.entries(), [this](const EntryPtr &r) { return ruleFileFor(r->str(QStringLiteral("type"))); });
+    const QStringList reordered = rulematch::cmdlineOrderChanges(m_rules.entries(), [this](const EntryPtr &r) {
+        return isPackaged(*r) ? r->file->path : ruleFileFor(r->str(QStringLiteral("type")));
+    });
     if (!reordered.isEmpty()) {
         const auto r = QMessageBox::warning(
             this, tr("Reorganize rules"),
@@ -1500,6 +1859,8 @@ void MainWindow::reorganizeRules()
     QSet<ConfFile *> sources;
     QSet<QString> targets;
     for (const auto &r : m_rules.entries()) {
+        if (isPackaged(*r))
+            continue; // never moved
         const QString target = ruleFileFor(r->str(QStringLiteral("type")));
         if (!r->file || QDir::cleanPath(r->file->path) != QDir::cleanPath(target)) {
             targets.insert(target);
@@ -1536,7 +1897,7 @@ void MainWindow::reorganizeRules()
     const QVector<EntryPtr> all = m_rules.entries();
     for (const auto &r : all) {
         const QString target = ruleFileFor(r->str(QStringLiteral("type")));
-        if (targets.contains(target))
+        if (!isPackaged(*r) && targets.contains(target))
             m_rules.moveTo(r, target, true);
     }
     m_rules.sortByLoadOrder();
@@ -1559,11 +1920,7 @@ void MainWindow::removeDuplicateRules()
         QMessageBox::information(this, tr("Remove duplicates"), tr("There are no duplicate rules."));
         return;
     }
-    QHash<QString, EntryPtr> lastPlain;
-    for (const auto &r : m_rules.entries())
-        if (!rulematch::hasCmdline(*r))
-            lastPlain[r->str(QStringLiteral("name"))] = r;
-    auto fileOf = [this](const EntryPtr &e) { return e->file ? m_ruleModel->relPath(e->file->path) : QString(); };
+    auto fileOf = [this](const EntryPtr &e) { return displayPath(*e); };
     auto typeOf = [this](const EntryPtr &e) {
         const QString t = e->str(QStringLiteral("type"));
         return t.isEmpty() ? tr("no type") : t;
@@ -1572,15 +1929,15 @@ void MainWindow::removeDuplicateRules()
     for (const auto &r : drop) {
         if (preview.size() >= 15)
             break;
-        const QString n = r->str(QStringLiteral("name"));
-        if (rulematch::hasCmdline(*r)) {
-            const EntryPtr k = m_ruleAnalysis.shadowedBy.value(r.get());
-            preview << tr("%1 [%2]: never used, %3 [%4] matches first; remove %5")
-                           .arg(n, rulematch::needlesText(*r), k ? fileOf(k) : QString(),
-                                k ? rulematch::needlesText(*k) : QString(), fileOf(r));
-        } else {
-            const EntryPtr k = lastPlain.value(n);
+        const QString n = rulematch::hasCmdline(*r) ? QStringLiteral("%1 [%2]").arg(r->str(QStringLiteral("name")),
+                                                                                  rulematch::needlesText(*r))
+                                                    : r->str(QStringLiteral("name"));
+        if (const EntryPtr k = m_ruleAnalysis.replacedBy.value(r.get())) {
             preview << tr("%1: keep %2 (%3), remove %4").arg(n, fileOf(k), typeOf(k), fileOf(r));
+        } else {
+            const EntryPtr s = m_ruleAnalysis.shadowedBy.value(r.get());
+            preview << tr("%1: never used, %2 [%3] matches first; remove %4")
+                           .arg(n, s ? fileOf(s) : QString(), s ? rulematch::needlesText(*s) : QString(), fileOf(r));
         }
     }
     QString q = tr("%n duplicate rule(s) will be removed. They are never used, so nothing changes for any process. "
@@ -1609,6 +1966,8 @@ void MainWindow::reorganizeTypes()
     int toMove = 0;
     QSet<ConfFile *> sources;
     for (const auto &t : m_types.entries()) {
+        if (isPackaged(*t))
+            continue; // never moved
         if (!t->file || QDir::cleanPath(t->file->path) != target) {
             ++toMove;
             if (t->file)

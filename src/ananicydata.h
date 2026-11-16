@@ -36,6 +36,9 @@ struct ConfLine {
 
 struct ConfFile {
     QString path;
+    // From the packaged directory (/usr/share/ananicy.d): loaded before the configuration
+    // directory and never written. Changes go to /etc/ananicy.d as overrides.
+    bool packaged = false;
     bool existed = false;
     bool loaded = false;     // content was read from disk (or written by us); false for files we never read
     bool dirty = false;
@@ -56,6 +59,9 @@ struct ConfFile {
     bool shouldSkip() const { return !existed && entryCount() == 0; }
 };
 
+// Entry from the packaged directory (read-only).
+inline bool isPackaged(const Entry &e) { return e.file && e.file->packaged; }
+
 QByteArray fileHash(const QString &path);       // SHA-1 of the file on disk, empty if it does not exist
 QByteArray contentHash(const QByteArray &data); // SHA-1 of data
 
@@ -66,8 +72,10 @@ public:
         : m_primaryKey(std::move(primaryKey)), m_keyOrder(std::move(keyOrder)) {}
 
     void clear();
-    void loadFile(const QString &path);
-    void loadTree(const QString &dir, const QString &pattern, bool recursive);
+    // packaged: the files come from the packaged directory; load them before the configuration
+    // directory, like ananicy-cpp does. Their entries are never changed, moved or removed.
+    void loadFile(const QString &path, bool packaged = false);
+    void loadTree(const QString &dir, const QString &pattern, bool recursive, bool packaged = false);
 
     ConfFile *fileFor(const QString &path); // existing or newly created (empty) file
     EntryPtr add(const QString &filePath, const QString &primaryValue);
@@ -76,7 +84,8 @@ public:
     // that is already in that file is moved to its end too (used to keep load order when merging).
     // Call sortByLoadOrder() after a batch of moves.
     void moveTo(const EntryPtr &e, const QString &filePath, bool reappend = false);
-    // Re-sorts entries() into the order ananicy loads them (file path, then line), so that
+    // Re-sorts entries() into the order ananicy loads them (packaged files first, then file path,
+    // then line), so that
     // find() and duplicate handling agree with what is on disk after entries were moved.
     void sortByLoadOrder();
     void markModified(const EntryPtr &e);

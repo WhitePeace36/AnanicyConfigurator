@@ -206,7 +206,7 @@ void EntryStore::clear()
     warnings.clear();
 }
 
-void EntryStore::loadFile(const QString &path)
+void EntryStore::loadFile(const QString &path, bool packaged)
 {
     // Binary mode: QIODevice::Text would drop the '\r' of CRLF files, and the hash taken
     // here would then never match fileHash() at save time.
@@ -217,6 +217,7 @@ void EntryStore::loadFile(const QString &path)
     }
     auto file = std::make_unique<ConfFile>();
     file->path = path;
+    file->packaged = packaged;
     file->existed = true;
     file->loaded = true;
 
@@ -256,7 +257,7 @@ void EntryStore::loadFile(const QString &path)
     m_files.push_back(std::move(file));
 }
 
-void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recursive)
+void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recursive, bool packaged)
 {
     QStringList paths;
     // Like ananicy-cpp (std::filesystem::recursive_directory_iterator), do not descend into
@@ -272,7 +273,7 @@ void EntryStore::loadTree(const QString &dir, const QString &pattern, bool recur
     // "a/x.rules" comes before "a-b/x.rules" (a plain string sort puts '-' before '/').
     std::sort(paths.begin(), paths.end(), rulematch::pathLess);
     for (const QString &p : paths)
-        loadFile(p);
+        loadFile(p, packaged);
 }
 
 ConfFile *EntryStore::fileFor(const QString &path)
@@ -309,7 +310,7 @@ EntryPtr EntryStore::add(const QString &filePath, const QString &primaryValue)
 
 void EntryStore::remove(const EntryPtr &e)
 {
-    if (!e)
+    if (!e || isPackaged(*e)) // packaged files are never written
         return;
     if (ConfFile *file = e->file) {
         for (int i = 0; i < file->lines.size(); ++i) {
@@ -326,7 +327,7 @@ void EntryStore::remove(const EntryPtr &e)
 void EntryStore::moveTo(const EntryPtr &e, const QString &filePath, bool reappend)
 {
     ConfFile *target = fileFor(filePath);
-    if (!e || (e->file == target && !reappend))
+    if (!e || isPackaged(*e) || (e->file == target && !reappend))
         return;
     if (ConfFile *old = e->file) {
         for (int i = 0; i < old->lines.size(); ++i) {
@@ -344,7 +345,8 @@ void EntryStore::moveTo(const EntryPtr &e, const QString &filePath, bool reappen
 
 void EntryStore::sortByLoadOrder()
 {
-    // Same order as loadTree(): files sorted by path, then by line within each file.
+    // Same order as ananicy-cpp: packaged files first, then the configuration directory; within
+    // each, files sorted by path, then by line within each file.
     QHash<const Entry *, int> lineOf;
     for (const auto &f : m_files) {
         for (int i = 0; i < f->lines.size(); ++i)
@@ -352,6 +354,8 @@ void EntryStore::sortByLoadOrder()
                 lineOf.insert(f->lines[i].entry.get(), i);
     }
     std::stable_sort(m_entries.begin(), m_entries.end(), [&](const EntryPtr &a, const EntryPtr &b) {
+        if (isPackaged(*a) != isPackaged(*b))
+            return isPackaged(*a);
         const QString pa = a->file ? a->file->path : QString();
         const QString pb = b->file ? b->file->path : QString();
         if (const int c = rulematch::pathCompare(pa, pb))
@@ -362,6 +366,8 @@ void EntryStore::sortByLoadOrder()
 
 void EntryStore::markModified(const EntryPtr &e)
 {
+    if (isPackaged(*e))
+        return;
     e->modified = true;
     if (e->file)
         e->file->dirty = true;
@@ -398,7 +404,7 @@ QMap<QString, QByteArray> EntryStore::pendingWrites() const
 {
     QMap<QString, QByteArray> out;
     for (const auto &f : m_files)
-        if (f->dirty && !f->shouldDelete() && !f->shouldSkip())
+        if (f->dirty && !f->packaged && !f->shouldDelete() && !f->shouldSkip())
             out.insert(f->path, f->render(m_keyOrder).toUtf8());
     return out;
 }
@@ -421,7 +427,7 @@ QStringList EntryStore::pendingDeletes() const
 {
     QStringList out;
     for (const auto &f : m_files)
-        if (f->shouldDelete())
+        if (!f->packaged && f->shouldDelete())
             out << f->path;
     return out;
 }

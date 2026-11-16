@@ -72,6 +72,21 @@ bool matches(const QStringList &n, const QString &cmdline)
     return std::all_of(n.begin(), n.end(), [&](const QString &s) { return cmdline.contains(s); });
 }
 
+QString ruleKey(const Entry &e)
+{
+    const QString name = e.str(QStringLiteral("name"));
+    if (!hasCmdline(e))
+        return name;
+    const QChar sep(0x1f);
+    bool valid = true;
+    QStringList n = needles(e, &valid);
+    if (!valid)
+        return name + sep + QStringLiteral("invalid") + sep + jsonValueText(e.value(kCmdlineKey));
+    n.removeDuplicates();
+    n.sort();
+    return name + sep + n.join(sep);
+}
+
 bool shadows(const Entry &earlier, const Entry &later)
 {
     if (earlier.str(QStringLiteral("name")) != later.str(QStringLiteral("name")))
@@ -80,6 +95,8 @@ bool shadows(const Entry &earlier, const Entry &later)
     const QStringList a = needles(earlier, &v1), b = needles(later, &v2);
     if (!v1 || !v2 || a.isEmpty() || b.isEmpty())
         return false;
+    if (ruleKey(earlier) == ruleKey(later))
+        return false; // same texts: the later rule replaces the earlier one
     return std::all_of(a.begin(), a.end(), [&](const QString &x) {
         return std::any_of(b.begin(), b.end(), [&](const QString &y) { return y.contains(x); });
     });
@@ -88,6 +105,7 @@ bool shadows(const Entry &earlier, const Entry &later)
 EntryPtr match(const QVector<EntryPtr> &rules, const QString &name, const QString &cmdline)
 {
     EntryPtr plain;
+    QVector<EntryPtr> byCmdline; // in load order; a later rule with the same texts replaces one
     for (const EntryPtr &r : rules) {
         if (r->str(QStringLiteral("name")) != name)
             continue;
@@ -96,10 +114,18 @@ EntryPtr match(const QVector<EntryPtr> &rules, const QString &name, const QStrin
             continue;
         }
         bool valid = true;
-        const QStringList n = needles(*r, &valid);
-        if (valid && matches(n, cmdline))
-            return r; // the first matching cmdline rule wins
+        needles(*r, &valid);
+        if (!valid)
+            continue; // ananicy-cpp ignores the line
+        const QString key = ruleKey(*r);
+        byCmdline.erase(std::remove_if(byCmdline.begin(), byCmdline.end(),
+                                       [&](const EntryPtr &x) { return ruleKey(*x) == key; }),
+                        byCmdline.end());
+        byCmdline << r;
     }
+    for (const EntryPtr &r : byCmdline)
+        if (matches(needles(*r), cmdline))
+            return r; // the first matching cmdline rule wins
     return plain;
 }
 
@@ -115,18 +141,20 @@ int Analysis::duplicatePlainNames() const
 Analysis analyze(const QVector<EntryPtr> &rules)
 {
     Analysis a;
-    QHash<QString, QVector<EntryPtr>> cmdlineRules; // per name, load order
+    QHash<QString, EntryPtr> last; // per ruleKey(): the rule ananicy-cpp keeps
     for (const EntryPtr &r : rules) {
-        const QString n = r->str(QStringLiteral("name"));
-        if (hasCmdline(*r))
-            cmdlineRules[n] << r;
-        else
-            a.plainCount[n]++;
+        last[ruleKey(*r)] = r;
+        if (!hasCmdline(*r) && !isPackaged(*r))
+            a.plainCount[r->str(QStringLiteral("name"))]++;
     }
+    QHash<QString, QVector<EntryPtr>> kept; // per name: cmdline rules that are used, load order
     for (const EntryPtr &r : rules) {
         const QString n = r->str(QStringLiteral("name"));
+        const EntryPtr winner = last.value(ruleKey(*r));
+        if (winner != r)
+            a.replacedBy.insert(r.get(), winner);
         if (!hasCmdline(*r)) {
-            if (a.plainCount.value(n) > 1)
+            if (a.plainCount.value(n) > 1 && !isPackaged(*r))
                 a.problem.insert(r.get(), QObject::tr("Duplicate: there is more than one rule for this process "
                                                       "without \"command line contains\" (use \"Remove duplicates…\")"));
             continue;
@@ -134,21 +162,29 @@ Analysis analyze(const QVector<EntryPtr> &rules)
         bool valid = true;
         needles(*r, &valid);
         if (!valid) {
-            a.problem.insert(r.get(), QObject::tr("Invalid \"cmdline_contains\": it must be a non-empty text or "
-                                                  "a list of non-empty texts. ananicy-cpp ignores this rule."));
+            if (!isPackaged(*r))
+                a.problem.insert(r.get(), QObject::tr("Invalid \"cmdline_contains\": it must be a non-empty text or "
+                                                      "a list of non-empty texts. ananicy-cpp ignores this rule."));
             continue;
         }
-        for (const EntryPtr &earlier : cmdlineRules.value(n)) {
-            if (earlier == r)
-                break;
+        if (winner != r) {
+            if (!isPackaged(*r))
+                a.problem.insert(r.get(), QObject::tr("Duplicate: a later rule for \"%1\" with the same command line "
+                                                      "texts replaces this one (use \"Remove duplicates…\")")
+                                              .arg(n));
+            continue;
+        }
+        for (const EntryPtr &earlier : kept.value(n)) {
             if (shadows(*earlier, *r)) {
                 a.shadowedBy.insert(r.get(), earlier);
-                a.problem.insert(r.get(), QObject::tr("Never used: an earlier rule for \"%1\" (command line contains "
-                                                      "\"%2\") matches first (use \"Remove duplicates…\")")
-                                              .arg(n, needlesText(*earlier)));
+                if (!isPackaged(*r))
+                    a.problem.insert(r.get(), QObject::tr("Never used: an earlier rule for \"%1\" (command line "
+                                                          "contains \"%2\") matches first (use \"Remove duplicates…\")")
+                                                  .arg(n, needlesText(*earlier)));
                 break;
             }
         }
+        kept[n] << r;
     }
     return a;
 }
@@ -156,18 +192,16 @@ Analysis analyze(const QVector<EntryPtr> &rules)
 QVector<EntryPtr> removableDuplicates(const QVector<EntryPtr> &rules)
 {
     const Analysis a = analyze(rules);
-    QHash<QString, EntryPtr> lastPlain;
-    for (const EntryPtr &r : rules)
-        if (!hasCmdline(*r))
-            lastPlain[r->str(QStringLiteral("name"))] = r;
     QVector<EntryPtr> out;
     for (const EntryPtr &r : rules) {
-        if (hasCmdline(*r)) {
-            if (a.shadowedBy.contains(r.get()))
-                out << r;
-        } else if (lastPlain.value(r->str(QStringLiteral("name"))) != r) {
+        if (isPackaged(*r))
+            continue; // never written
+        bool valid = true;
+        needles(*r, &valid);
+        if (!valid)
+            continue; // not a duplicate, just broken: shown as a problem
+        if (a.replacedBy.contains(r.get()) || a.shadowedBy.contains(r.get()))
             out << r;
-        }
     }
     return out;
 }
@@ -182,7 +216,12 @@ QStringList cmdlineOrderChanges(const QVector<EntryPtr> &rules,
     QVector<QString> path(rules.size());
     for (int i = 0; i < rules.size(); ++i)
         path[i] = newPathOf(rules[i]);
-    std::stable_sort(idx.begin(), idx.end(), [&](int x, int y) { return pathLess(path[x], path[y]); });
+    // packaged files load first; they never move
+    std::stable_sort(idx.begin(), idx.end(), [&](int x, int y) {
+        if (isPackaged(*rules[x]) != isPackaged(*rules[y]))
+            return isPackaged(*rules[x]);
+        return pathLess(path[x], path[y]);
+    });
 
     QHash<QString, QVector<const Entry *>> before, after;
     for (const EntryPtr &r : rules)

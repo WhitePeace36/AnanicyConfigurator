@@ -21,6 +21,12 @@ public:
 
     void setColumns(QVector<Column> cols);
     void setWarnFn(std::function<QString(const Entry &)> fn) { m_warn = std::move(fn); }
+    // Rows for which this returns true are left out by EntryFilterProxy (e.g. packaged entries
+    // that an entry in /etc/ananicy.d overrides).
+    void setHiddenFn(std::function<bool(const Entry &)> fn) { m_hidden = std::move(fn); }
+    // Called before the view or the filter re-reads rows (reset(), entryChanged(), allChanged()),
+    // to bring data that the column, warning and hidden functions use up to date.
+    void setRefreshFn(std::function<void()> fn) { m_refresh = std::move(fn); }
 
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
@@ -35,12 +41,15 @@ public:
     QString relPath(const QString &path) const;
 
     static constexpr int SortRole = Qt::UserRole + 1;
+    static constexpr int HiddenRole = Qt::UserRole + 2;
 
 private:
     EntryStore *m_store;
     QString m_root;
     QVector<Column> m_cols;
     std::function<QString(const Entry &)> m_warn;
+    std::function<bool(const Entry &)> m_hidden;
+    std::function<void()> m_refresh;
 };
 
 // Proxy with free-text filter plus an optional exact match on one column.

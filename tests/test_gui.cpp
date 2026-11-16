@@ -151,12 +151,47 @@ void selectRow(QTableView *v, const QString &name, const QString &cmdline)
     QFAIL("row not found");
 }
 
+// Text of the rules table's "Source" column for a rule ("<not shown>" if it has no row).
+QString sourceOf(QTableView *v, const QString &name, const QString &cmdline)
+{
+    QAbstractItemModel *m = v->model();
+    int col = -1;
+    for (int c = 0; c < m->columnCount(); ++c)
+        if (m->headerData(c, Qt::Horizontal).toString() == QLatin1String("Source"))
+            col = c;
+    QString out = QStringLiteral("<not shown>");
+    for (int r = 0; r < m->rowCount(); ++r)
+        if (m->index(r, 0).data().toString() == name && m->index(r, 1).data().toString() == cmdline)
+            out = out == QLatin1String("<not shown>") ? m->index(r, col).data().toString() : QStringLiteral("<twice>");
+    return out;
+}
+
 } // namespace
 
 class TestGui : public QObject {
     Q_OBJECT
     QTemporaryDir home, conf;
     QString root, supported, unsupported;
+
+    // packaged rules (pkg, like /usr/share/ananicy.d) and changes to them (etc, like /etc/ananicy.d)
+    QString pkg, etc;
+    QByteArray pkgRules;
+    void packagedSetup()
+    {
+        pkg = conf.path() + "/usr-share/ananicy.d";
+        etc = conf.path() + "/etc/ananicy.d";
+        QDir(pkg).removeRecursively(); // every test starts from the same files
+        QDir(etc).removeRecursively();
+        writeFile(pkg + "/ananicy.conf", "check_freq = 10\napply_nice = false\nmy_key = 1\n");
+        writeFile(pkg + "/99-types.types", "{\"type\": \"Game\", \"nice\": -5}\n{\"type\": \"Heavy\", \"nice\": 10}\n");
+        pkgRules = "{\"name\": \"steam\", \"type\": \"Game\"}\n"
+                   "{\"name\": \"lutris\", \"type\": \"Game\"}\n"
+                   "{\"name\": \"heroic\", \"type\": \"Game\"}\n"
+                   "{\"name\": \"java\", \"cmdline_contains\": \"minecraft\", \"type\": \"Game\"}\n";
+        writeFile(pkg + "/99-rules/Game.rules", pkgRules);
+        writeFile(etc + "/99-rules/Game.rules", "{\"name\": \"lutris\", \"type\": \"Heavy\"}\n{\"name\": \"heroic\"}\n");
+        writeFile(etc + "/99-rules/custom.rules", "{\"name\": \"mine\", \"nice\": 1}\n");
+    }
 
 private slots:
     void initTestCase()
@@ -186,7 +221,7 @@ private slots:
 
     void tableShowsCmdlineAndWarnings()
     {
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QTableView *v = ruleView(&w);
         QVERIFY(v);
         const auto rs = rows(v);
@@ -204,7 +239,7 @@ private slots:
     void unsupportedDaemonWarns()
     {
         qputenv("ANANICY_CPP_BINARY", unsupported.toUtf8());
-        MainWindow w(root);
+        MainWindow w(root, QString());
         const auto rs = rows(ruleView(&w));
         QVERIFY(find(rs, "java", "minecraft").warning.contains("does not support"));
         QCOMPARE(find(rs, "java", "").warning, QString()); // plain rules are fine
@@ -214,7 +249,7 @@ private slots:
     void removeDuplicatesAndSave()
     {
         const QByteArray gameBefore = readFile(root + "/99-rules/game.rules");
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QString q;
         answer(QMessageBox::Yes, &q);
         button(&w, "Remove duplicates…")->click();
@@ -231,7 +266,7 @@ private slots:
 
     void addRuleWithCmdline()
     {
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QString q;
         whenModal<EntryDialog>([&](EntryDialog *d) {
             auto *name = d->findChildren<QLineEdit *>().first();
@@ -259,7 +294,7 @@ private slots:
 
     void editCmdlineToStringAndToPlain()
     {
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QTableView *v = ruleView(&w);
         selectRow(v, "java", "jenkins.war + --httpPort");
         whenModal<EntryDialog>([](EntryDialog *d) {
@@ -290,7 +325,7 @@ private slots:
         // game.rules: java/minecraft (Game) ... ; add a Ci cmdline rule *after* it in game.rules order:
         writeFile(root + "/99-rules/zz.rules",
                   "{\"name\": \"java\", \"cmdline_contains\": \"mine\", \"type\": \"Ci\"}\n");
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QString q;
         answer(QMessageBox::No);      // "remove duplicates first?" (two plain java rules now)
         answer(QMessageBox::Cancel, &q);
@@ -298,6 +333,147 @@ private slots:
         QVERIFY2(q.contains("different order") && q.contains("java"), qPrintable(q));
         QVERIFY(!w.windowTitle().endsWith(" *")); // cancelled: nothing changed
         QFile::remove(root + "/99-rules/zz.rules");
+    }
+
+    // ---- packaged rules (/usr/share/ananicy.d) with changes in /etc/ananicy.d
+
+    void packagedLayerIsShownMerged()
+    {
+        packagedSetup();
+        MainWindow w(etc, pkg);
+        QTableView *v = ruleView(&w);
+        QCOMPARE(sourceOf(v, "steam", ""), QString("Packaged"));
+        QCOMPARE(sourceOf(v, "lutris", ""), QString("Changed")); // one row: the packaged one is replaced
+        QCOMPARE(find(rows(v), "lutris", "").type, QString("Heavy"));
+        QCOMPARE(sourceOf(v, "heroic", ""), QString("Off"));
+        QCOMPARE(sourceOf(v, "java", "minecraft"), QString("Packaged"));
+        QCOMPARE(sourceOf(v, "mine", ""), QString("Yours"));
+        for (const Row &r : rows(v))
+            QVERIFY2(r.warning.isEmpty(), qPrintable(r.name + ": " + r.warning)); // overrides are not duplicates
+        QString text;
+        whenModal<QMessageBox>([&](QMessageBox *b) {
+            text = b->text();
+            b->accept();
+        });
+        button(&w, "Remove duplicates…")->click();
+        QCOMPARE(text, QString("There are no duplicate rules."));
+        QVERIFY(!w.windowTitle().endsWith(" *"));
+    }
+
+    void editingPackagedRuleSavesOverride()
+    {
+        packagedSetup();
+        MainWindow w(etc, pkg);
+        QTableView *v = ruleView(&w);
+        selectRow(v, "steam", "");
+        whenModal<EntryDialog>([](EntryDialog *d) {
+            d->findChildren<QComboBox *>().first()->setCurrentText("Heavy");
+            d->accept();
+        });
+        ruleButton(&w, "Edit…")->click();
+        QCOMPARE(sourceOf(v, "steam", ""), QString("Changed"));
+        button(&w, "Save")->click();
+        QCOMPARE(readFile(pkg + "/99-rules/Game.rules"), pkgRules); // never written
+        QCOMPARE(readFile(etc + "/99-rules/Game.rules"),
+                 QByteArray("{\"name\": \"lutris\", \"type\": \"Heavy\"}\n{\"name\": \"heroic\"}\n"
+                            "{ \"name\": \"steam\", \"type\": \"Heavy\" }\n"));
+    }
+
+    void deletingPackagedRuleSwitchesItOffAndResetUndoes()
+    {
+        packagedSetup();
+        MainWindow w(etc, pkg);
+        QTableView *v = ruleView(&w);
+        selectRow(v, "java", "minecraft");
+        QString q;
+        QPushButton *del = ruleButton(&w, "Delete"), *reset = ruleButton(&w, "Reset to packaged");
+        QVERIFY2(del, "Delete");
+        QVERIFY2(reset, "Reset to packaged");
+        answer(QMessageBox::Yes, &q);
+        del->click();
+        QVERIFY2(q.startsWith("Switch off the packaged rule"), qPrintable(q));
+        QCOMPARE(sourceOf(v, "java", "minecraft"), QString("Off"));
+        button(&w, "Save")->click();
+        const QByteArray withOff = readFile(etc + "/99-rules/Game.rules");
+        QVERIFY2(withOff.endsWith("{ \"name\": \"java\", \"cmdline_contains\": \"minecraft\" }\n"), withOff.constData());
+
+        selectRow(v, "java", "minecraft");
+        reset->click();
+        QCOMPARE(sourceOf(v, "java", "minecraft"), QString("Packaged"));
+        selectRow(v, "lutris", "");
+        reset->click();
+        QCOMPARE(sourceOf(v, "lutris", ""), QString("Packaged"));
+        QCOMPARE(find(rows(v), "lutris", "").type, QString("Game"));
+        button(&w, "Save")->click();
+        QCOMPARE(readFile(etc + "/99-rules/Game.rules"), QByteArray("{\"name\": \"heroic\"}\n"));
+        QCOMPARE(readFile(pkg + "/99-rules/Game.rules"), pkgRules);
+    }
+
+    void packagedTypeSwitchOffAndReset()
+    {
+        packagedSetup();
+        MainWindow w(etc, pkg);
+        screenshot(&w, "main-window-packaged.png");
+        QTableView *types = nullptr;
+        for (QTableView *v : w.findChildren<QTableView *>())
+            if (v->model() && v->model()->headerData(0, Qt::Horizontal).toString() == QLatin1String("Type"))
+                types = v;
+        QVERIFY(types);
+        QAbstractItemModel *m = types->model();
+        int heavy = -1, sourceCol = -1;
+        for (int c = 0; c < m->columnCount(); ++c)
+            if (m->headerData(c, Qt::Horizontal).toString() == QLatin1String("Source"))
+                sourceCol = c;
+        for (int r = 0; r < m->rowCount(); ++r)
+            if (m->index(r, 0).data().toString() == QLatin1String("Heavy"))
+                heavy = r;
+        QVERIFY(heavy >= 0 && sourceCol >= 0);
+        QCOMPARE(m->index(heavy, sourceCol).data().toString(), QString("Packaged"));
+        types->setCurrentIndex(m->index(heavy, 0));
+
+        // the types section's buttons come after the rules section's ones
+        QPushButton *del = button(&w, "Delete", 1), *reset = button(&w, "Reset to packaged", 1);
+        QVERIFY(del && reset);
+        QString q;
+        answer(QMessageBox::Yes, &q);
+        del->click();
+        QVERIFY2(q.startsWith("Switch off the packaged type \"Heavy\""), qPrintable(q));
+        QVERIFY2(q.contains("1 rule(s) use this type"), qPrintable(q)); // lutris (changed to Heavy)
+        button(&w, "Save")->click();
+        QCOMPARE(readFile(etc + "/99-types.types"), QByteArray("{ \"type\": \"Heavy\" }\n"));
+
+        for (int r = 0; r < m->rowCount(); ++r)
+            if (m->index(r, 0).data().toString() == QLatin1String("Heavy")) {
+                QCOMPARE(m->index(r, sourceCol).data().toString(), QString("Off"));
+                types->setCurrentIndex(m->index(r, 0));
+            }
+        reset->click();
+        QString del2;
+        answer(QMessageBox::Yes, &del2); // "Saving will delete 1 file(s) that no longer contain any rules or types"
+        button(&w, "Save")->click();
+        QVERIFY2(del2.contains("delete 1 file"), qPrintable(del2));
+        QVERIFY(!QFile::exists(etc + "/99-types.types")); // nothing left: the file is removed
+        QCOMPARE(readFile(pkg + "/99-types.types"),
+                 QByteArray("{\"type\": \"Game\", \"nice\": -5}\n{\"type\": \"Heavy\", \"nice\": 10}\n"));
+    }
+
+    void packagedConfShowsDefaultsAndSavesOnlyChanges()
+    {
+        packagedSetup();
+        MainWindow w(etc, pkg);
+        QComboBox *applyNice = nullptr;
+        for (QComboBox *c : w.findChildren<QComboBox *>())
+            if (c->count() > 0 && c->itemText(0) == QLatin1String("(packaged: false)"))
+                applyNice = c;
+        QVERIFY(applyNice);
+        QCOMPARE(applyNice->currentIndex(), 0); // nothing set in /etc: the packaged value applies
+        applyNice->setCurrentIndex(applyNice->findText("true"));
+        button(&w, "Save")->click();
+        QCOMPARE(readFile(etc + "/ananicy.conf"), QByteArray("apply_nice=true\n"));
+        QVERIFY(readFile(pkg + "/ananicy.conf").startsWith("check_freq = 10"));
+        applyNice->setCurrentIndex(0); // back to the packaged value: the key is removed again
+        button(&w, "Save")->click();
+        QCOMPARE(readFile(etc + "/ananicy.conf"), QByteArray(""));
     }
 
     void addFromRunningProcess()
@@ -309,7 +485,7 @@ private slots:
         QVERIFY(p.waitForStarted());
         QTest::qWait(300);
 
-        MainWindow w(root);
+        MainWindow w(root, QString());
         QString ruleCol, okText;
         whenModal<ProcessDialog>([&](ProcessDialog *d) {
             auto *tree = d->findChild<QTreeWidget *>();

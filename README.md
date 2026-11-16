@@ -69,10 +69,12 @@ How ananicy-cpp picks a rule, and what the configurator therefore checks:
 - Rules with **command line contains** are tried in load order (files sorted by path, then line
   by line), and **the first one that matches wins**. If none matches, the rule for the same name
   without it is used, if there is one.
-- They don't replace each other or the normal rule, so several rules for `java` are fine. A rule
-  is only reported as **never used** if an earlier rule for the same name always matches first:
-  the same texts, or texts that contain the earlier rule's texts (`minecraft-server` after
-  `minecraft`). **Remove duplicates…** deletes those.
+- Rules with other texts don't replace each other or the normal rule, so several rules for `java`
+  are fine. A later rule with the **same** texts (in any order) replaces an earlier one, as if that
+  had never been loaded; the earlier one is reported as a duplicate. A rule is reported as
+  **never used** if an earlier rule for the same name always matches first: texts that contain
+  the earlier rule's texts (`minecraft-server` after `minecraft`). **Remove duplicates…** deletes
+  both kinds.
 - Adding a rule with the same name and the same texts as an existing one asks first.
 - **Add from running process…** → unfold a name → pick a command line. This creates such a rule
   and suggests a text: the jar after `-jar`, the module after `-m`, or the script or program
@@ -85,14 +87,47 @@ the `PATH`). If it doesn't, for example with upstream ananicy-cpp or the origina
 that use it are marked: those programs ignore the field, so the rule would apply to every process
 with that name and replace other rules for that name.
 
+## Packaged rules (`/usr/share/ananicy.d`)
+
+A distribution package can install its rules, types and `ananicy.conf` to `/usr/share/ananicy.d`.
+ananicy-cpp from [WhitePeace36/ananicy-cpp](https://github.com/WhitePeace36/ananicy-cpp) (1.4.0 or
+newer) loads that folder first and `/etc/ananicy.d` after it, so whatever is defined in
+`/etc/ananicy.d` replaces the packaged definition. Package updates replace `/usr/share/ananicy.d`
+completely and never touch your changes.
+
+If `/usr/share/ananicy.d` exists, the configurator reads both and shows one list. The **Source**
+column says where each entry comes from:
+
+| Source | Meaning |
+|---|---|
+| Packaged | From the package, unchanged. Read-only: it gets the package's updates. |
+| Changed | Your version in `/etc/ananicy.d` replaces the packaged one (which is then not listed). |
+| Off | A packaged entry switched off: `/etc/ananicy.d` has it without settings, e.g. `{ "name": "steam" }`. |
+| Yours | Only in `/etc/ananicy.d`. |
+
+- **Editing** a packaged rule or type saves your version to `/etc/ananicy.d`, in the file with the
+  same relative path (`/usr/share/ananicy.d/99-rules/Game.rules` →
+  `/etc/ananicy.d/99-rules/Game.rules`). Only that entry is written there, so the package's other
+  entries keep getting updates.
+- **Delete** switches a packaged entry off (it cannot be removed from the package).
+- **Reset to packaged** removes your version or the switch-off line, so the package's version
+  applies again.
+- **ananicy.conf**: settings you don't change show the packaged value (`(packaged: …)`); only the
+  settings you change are saved in `/etc/ananicy.d/ananicy.conf`, and they win.
+- Files in `/usr/share/ananicy.d` are never written. **Remove duplicates…**, **Reorganize…** and
+  **Move all into 99-types.types** only change `/etc/ananicy.d`, and an entry there that
+  replaces a packaged one is not a duplicate.
+
+Without `/usr/share/ananicy.d`, only the configuration directory is used, as before.
+
 ## Where changes are written
 
 | What | File |
 |---|---|
-| Changed existing rule | the same file it was loaded from (only that line changes), even if its type changes |
+| Changed existing rule | the same file it was loaded from (only that line changes), even if its type changes; for a packaged rule, the file with the same relative path in `/etc/ananicy.d` |
 | New rule with a type | `/etc/ananicy.d/99-rules/<type>.rules`, e.g. `99-rules/game.rules` |
 | New rule without a type | `/etc/ananicy.d/99-rules/custom.rules` |
-| Changed existing type | the same file it was loaded from |
+| Changed existing type | the same file it was loaded from; for a packaged type, the file with the same relative path in `/etc/ananicy.d` |
 | New type | `/etc/ananicy.d/99-types.types` |
 | ananicy.conf settings | `/etc/ananicy.d/ananicy.conf` |
 

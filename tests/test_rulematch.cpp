@@ -80,7 +80,8 @@ private slots:
     void shadowing()
     {
         QVERIFY(shadows(*rule("java", "mine"), *rule("java", "minecraft")));             // substring
-        QVERIFY(shadows(*rule("java", "x"), *rule("java", "x")));                        // identical
+        QVERIFY(!shadows(*rule("java", "x"), *rule("java", "x")));                       // identical: replaces instead
+        QVERIFY(!shadows(*rule("java", arr({"a", "b"})), *rule("java", arr({"b", "a", "a"}))));
         QVERIFY(shadows(*rule("java", "-jar"), *rule("java", arr({"-jar", "a.jar"})))); // subset
         QVERIFY(!shadows(*rule("java", arr({"-jar", "a.jar"})), *rule("java", "-jar")));
         QVERIFY(!shadows(*rule("java", "minecraft"), *rule("java", "mine")));
@@ -97,16 +98,22 @@ private slots:
         const Analysis a = analyze(rules);
         QVERIFY(a.problem.contains(p1.get()) && a.problem.contains(p2.get())); // plain duplicates
         QVERIFY(!a.problem.contains(solo.get()));
-        QVERIFY(!a.problem.contains(c1.get()) && !a.problem.contains(c2.get())); // different texts: fine
-        QVERIFY(a.problem.contains(c3.get()) && a.shadowedBy.value(c3.get()) == c1); // "minecraft" matches first
-        QVERIFY(a.problem.contains(c4.get()) && a.shadowedBy.value(c4.get()) == c1); // identical
+        // c4 has the same texts as c1 and replaces it, as if c1 had never been loaded
+        QVERIFY(a.problem.value(c1.get()).startsWith("Duplicate"));
+        QCOMPARE(a.replacedBy.value(c1.get()), c4);
+        QVERIFY(!a.problem.contains(c2.get()) && !a.problem.contains(c4.get()));
+        // so "minecraft-server" comes before the "minecraft" rule now and is used
+        QVERIFY(!a.problem.contains(c3.get()) && !a.shadowedBy.contains(c3.get()));
         QVERIFY(a.problem.value(bad.get()).contains("Invalid"));
         QCOMPARE(a.duplicatePlainNames(), 1);
         // a cmdline rule next to a single plain rule is not a duplicate
         QVERIFY(analyze({rule("java"), rule("java", "x")}).problem.isEmpty());
+        // a rule for "minecraft" after one for "mine" can never match: "mine" always matches first
+        const auto early = rule("java", "mine"), late = rule("java", "minecraft");
+        QCOMPARE(analyze({early, late}).shadowedBy.value(late.get()), early);
 
         const QVector<EntryPtr> drop = removableDuplicates(rules);
-        QCOMPARE(drop, (QVector<EntryPtr>{p1, c3, c4})); // keeps the last plain, the first cmdline rule
+        QCOMPARE(drop, (QVector<EntryPtr>{p1, c1})); // keeps the last plain rule and the last of c1/c4
         // removing them changes nothing that ananicy-cpp does
         QVector<EntryPtr> kept = rules;
         for (const auto &d : drop)
@@ -115,6 +122,48 @@ private slots:
                                    QString("java other"), QString("gcc a.c")})
             for (const QString &n : {QString("java"), QString("gcc")})
                 QCOMPARE(match(kept, n, cmd), match(rules, n, cmd));
+    }
+
+    // same cases as ananicy-cpp's "cmdline_contains rules with the same texts replace each other"
+    void sameTextsReplace()
+    {
+        const auto a = rule("java", arr({"-jar", "a.jar"}), "one"), b = rule("java", "b.jar", "two");
+        const auto a2 = rule("java", arr({"a.jar", "-jar"}), "nine");
+        const QVector<EntryPtr> rules = {a, b, a2};
+        QCOMPARE(match(rules, "java", "java -jar a.jar")->str("type"), QStringLiteral("nine"));
+        QCOMPARE(match(rules, "java", "java -jar a.jar b.jar")->str("type"), QStringLiteral("two")); // b.jar first now
+        QCOMPARE(match(rules, "java", "java -jar b.jar")->str("type"), QStringLiteral("two"));
+        QCOMPARE(ruleKey(*a), ruleKey(*a2));
+        QVERIFY(ruleKey(*a) != ruleKey(*b));
+        QVERIFY(ruleKey(*rule("java")) != ruleKey(*rule("java", "x"))); // plain and cmdline rules differ
+    }
+
+    // Packaged rules (/usr/share/ananicy.d) load first; rules in /etc/ananicy.d override them.
+    void packagedRules()
+    {
+        ConfFile packaged, etc;
+        packaged.packaged = true;
+        auto in = [](ConfFile &f, EntryPtr e) {
+            e->file = &f;
+            return e;
+        };
+        const auto pSteam = in(packaged, rule("steam", {}, "Game")), eSteam = in(etc, rule("steam", {}, "Heavy"));
+        const auto pJava = in(packaged, rule("java", "minecraft", "Game")), eJava = in(etc, rule("java", "minecraft"));
+        const auto pDup1 = in(packaged, rule("gcc")), pDup2 = in(packaged, rule("gcc"));
+        const auto eDup1 = in(etc, rule("make")), eDup2 = in(etc, rule("make"));
+        const QVector<EntryPtr> rules = {pSteam, pJava, pDup1, pDup2, eSteam, eJava, eDup1, eDup2};
+
+        QCOMPARE(match(rules, "steam", "steam")->str("type"), QStringLiteral("Heavy"));
+        QCOMPARE(match(rules, "java", "java minecraft"), eJava); // switched off: no type
+        const Analysis a = analyze(rules);
+        // overrides are not duplicates, and the package's own duplicates are not shown
+        for (const auto &e : {pSteam, eSteam, pJava, eJava, pDup1, pDup2})
+            QVERIFY2(!a.problem.contains(e.get()), qPrintable(a.problem.value(e.get())));
+        QCOMPARE(a.replacedBy.value(pSteam.get()), eSteam);
+        QVERIFY(a.problem.contains(eDup1.get()) && a.problem.contains(eDup2.get()));
+        QCOMPARE(a.duplicatePlainNames(), 1); // only "make"
+        // packaged rules are never removed
+        QCOMPARE(removableDuplicates(rules), QVector<EntryPtr>{eDup1});
     }
 
     void reorganizeOrder()

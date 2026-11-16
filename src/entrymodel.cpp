@@ -38,6 +38,8 @@ QVariant EntryModel::data(const QModelIndex &index, int role) const
     case Qt::DisplayRole:
     case SortRole:
         return c.display(e);
+    case HiddenRole:
+        return m_hidden ? m_hidden(e) : false;
     case Qt::ToolTipRole: {
         QString tip = c.tooltip ? c.tooltip(e) : QString();
         if (m_warn) {
@@ -85,12 +87,16 @@ int EntryModel::rowOf(const EntryPtr &e) const
 
 void EntryModel::reset()
 {
+    if (m_refresh)
+        m_refresh();
     beginResetModel();
     endResetModel();
 }
 
 void EntryModel::entryChanged(const EntryPtr &e)
 {
+    if (m_refresh)
+        m_refresh();
     int r = rowOf(e);
     if (r >= 0)
         emit dataChanged(index(r, 0), index(r, columnCount() - 1));
@@ -98,6 +104,8 @@ void EntryModel::entryChanged(const EntryPtr &e)
 
 void EntryModel::allChanged()
 {
+    if (m_refresh)
+        m_refresh();
     if (rowCount() > 0)
         emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
 }
@@ -136,6 +144,8 @@ void EntryFilterProxy::setExact(int column, const QString &value)
 bool EntryFilterProxy::filterAcceptsRow(int row, const QModelIndex &parent) const
 {
     QAbstractItemModel *m = sourceModel();
+    if (m->index(row, 0, parent).data(EntryModel::HiddenRole).toBool())
+        return false;
     if (m_exactCol >= 0) {
         if (m->index(row, m_exactCol, parent).data().toString() != m_exactVal)
             return false;
