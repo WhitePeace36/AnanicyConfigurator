@@ -15,7 +15,7 @@ if [[ -n ${startdir:-} && ${BUILDDIR:-$startdir} -ef $startdir ]]; then
 fi
 
 pkgname=ananicy-configurator
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="Qt GUI to edit ananicy / ananicy-cpp types, rules and ananicy.conf"
 arch=('x86_64' 'aarch64')
