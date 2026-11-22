@@ -84,7 +84,8 @@ bool pathLess(const QString &a, const QString &b);
 int pathCompare(const QString &a, const QString &b);
 
 // The name ananicy-cpp matches rules against: the file name of argv[0] (for Windows programs
-// under Wine also split at '\'), else the file name of /proc/PID/exe, else comm.
+// under Wine also split at '\'; for a rewritten process title, the program it starts with),
+// else the file name of /proc/PID/exe, else comm.
 QString processName(const QStringList &argv, const QString &exeTarget, const QString &comm);
 
 // A text that identifies this command line for a cmdline_contains rule: the jar after -jar,

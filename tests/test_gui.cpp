@@ -495,7 +495,7 @@ private slots:
                 if (g->text(0) != "python3")
                     continue;
                 for (int c = 0; c < g->childCount(); ++c)
-                    if (g->child(c)->text(5).contains("cctest_gui_app.py"))
+                    if (g->child(c)->text(0).contains("cctest_gui_app.py"))
                         hit = g->child(c);
             }
             QVERIFY2(hit, "python3 / cctest_gui_app.py not listed");

@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -70,7 +71,7 @@ void addUnique(QStringList &l, const QString &v)
         l << v;
 }
 
-enum Col { ColName, ColCount, ColUser, ColRule, ColExe, ColCmd };
+enum Col { ColName, ColCount, ColUser, ColRule, ColExe };
 enum Role { ArgvRole = Qt::UserRole, SpecificRole, NameRole };
 
 } // namespace
@@ -113,8 +114,9 @@ ProcessDialog::ProcessDialog(Describe describe, bool ananicyCpp, QWidget *parent
     m_list->setUniformRowHeights(true);
     m_list->setSortingEnabled(true);
     m_list->setAlternatingRowColors(true);
+    m_list->setTextElideMode(Qt::ElideMiddle); // keep both the program and the trailing arguments visible
     m_list->setHeaderLabels({ananicyCpp ? tr("Name (argv[0])") : tr("Name (comm)"), tr("Instances"), tr("User"),
-                             tr("Existing rule"), tr("Executable"), tr("Command line")});
+                             tr("Existing rule"), tr("Executable")});
     m_list->header()->setSectionResizeMode(QHeaderView::Interactive);
     m_list->header()->setStretchLastSection(true);
     lay->addWidget(m_list, 1);
@@ -122,6 +124,10 @@ ProcessDialog::ProcessDialog(Describe describe, bool ananicyCpp, QWidget *parent
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     m_ok = buttons->button(QDialogButtonBox::Ok);
     m_ok->setText(tr("Create rule"));
+    // fixed width: the text changes with the selection and must not resize the dialog
+    m_ok->setFixedWidth(qMax(m_ok->fontMetrics().horizontalAdvance(tr("Create rule for this command line")),
+                             m_ok->fontMetrics().averageCharWidth() * 48)
+                        + m_ok->iconSize().width() + 40);
     lay->addWidget(buttons);
 
     connect(buttons, &QDialogButtonBox::accepted, this, &ProcessDialog::accept);
@@ -188,34 +194,30 @@ void ProcessDialog::reload()
         it->setText(ColUser, g.users.join(QStringLiteral(", ")));
         it->setText(ColRule, m_describe ? m_describe(g.name, nullptr) : QString());
         it->setText(ColExe, g.exe);
-        const QString firstCmd = g.instances.isEmpty() ? QString() : g.instances.first().cmdline.simplified();
-        it->setText(ColCmd, g.instances.size() > 1
-                                ? tr("%n different command lines (unfold)", nullptr, int(g.instances.size()))
-                                : firstCmd);
         it->setToolTip(ColName, tr("PIDs: %1").arg(g.pids.join(QStringLiteral(", "))));
-        it->setToolTip(ColCmd, g.instances.size() > 1 ? QString() : firstCmd);
         if (m_ananicyCpp) {
             for (const ProcInstance &in : g.instances) {
                 auto *child = new QTreeWidgetItem(it);
                 child->setData(ColName, NameRole, g.name);
                 child->setData(ColName, SpecificRole, true);
                 child->setData(ColName, ArgvRole, in.argv);
-                child->setText(ColName, tr("only this command line"));
+                // show the command line itself, so the rows of one name can be told apart
+                child->setText(ColName, in.cmdline.simplified());
                 child->setData(ColCount, Qt::DisplayRole, in.pids.size());
                 child->setText(ColUser, in.users.join(QStringLiteral(", ")));
                 child->setText(ColRule, m_describe ? m_describe(g.name, &in.cmdline) : QString());
-                child->setText(ColCmd, in.cmdline.simplified());
-                child->setToolTip(ColCmd, in.cmdline);
-                child->setToolTip(ColName, tr("PIDs: %1").arg(in.pids.join(QStringLiteral(", "))));
+                child->setToolTip(ColName, tr("Only processes with this command line:\n%1\n\nPIDs: %2")
+                                               .arg(in.cmdline, in.pids.join(QStringLiteral(", "))));
             }
         }
         m_list->addTopLevelItem(it);
     }
     m_list->setSortingEnabled(true);
     m_list->sortByColumn(ColName, Qt::AscendingOrder);
-    for (int c = 0; c < ColCmd; ++c)
+    for (int c = 0; c < ColExe; ++c)
         m_list->resizeColumnToContents(c);
-    m_list->setColumnWidth(ColExe, qMin(m_list->columnWidth(ColExe), 250));
+    // one very long argv[0] (Wine, setproctitle) must not push the other columns off-screen
+    m_list->setColumnWidth(ColName, qBound(200, m_list->columnWidth(ColName), 420));
     applyFilter();
 }
 
@@ -224,8 +226,7 @@ void ProcessDialog::applyFilter()
     const QString f = m_filter->text().trimmed();
     auto textMatch = [&](const QTreeWidgetItem *it) {
         return f.isEmpty() || it->text(ColName).contains(f, Qt::CaseInsensitive)
-               || it->text(ColExe).contains(f, Qt::CaseInsensitive)
-               || it->text(ColCmd).contains(f, Qt::CaseInsensitive);
+               || it->text(ColExe).contains(f, Qt::CaseInsensitive);
     };
     QTreeWidgetItem *firstVisible = nullptr;
     for (int i = 0; i < m_list->topLevelItemCount(); ++i) {
@@ -260,12 +261,19 @@ void ProcessDialog::updateOkButton()
     const QTreeWidgetItem *it = m_list->currentItem();
     if (!m_ok)
         return;
-    if (it && it->data(ColName, SpecificRole).toBool())
+    m_ok->setToolTip(QString());
+    if (it && it->data(ColName, SpecificRole).toBool()) {
         m_ok->setText(tr("Create rule for this command line"));
-    else if (it && m_ananicyCpp)
-        m_ok->setText(tr("Create rule for all \"%1\" processes").arg(it->data(ColName, NameRole).toString()));
-    else
+    } else if (it && m_ananicyCpp) {
+        const QString pattern = tr("Create rule for all \"%1\" processes");
+        const QString name = it->data(ColName, NameRole).toString();
+        const QFontMetrics fm = m_ok->fontMetrics();
+        const int room = m_ok->width() - m_ok->iconSize().width() - 48 - fm.horizontalAdvance(pattern.arg(QString()));
+        m_ok->setText(pattern.arg(fm.elidedText(name, Qt::ElideMiddle, qMax(room, 0))));
+        m_ok->setToolTip(name);
+    } else {
         m_ok->setText(tr("Create rule"));
+    }
 }
 
 void ProcessDialog::accept()

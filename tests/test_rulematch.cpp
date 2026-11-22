@@ -217,6 +217,16 @@ private slots:
         QCOMPARE(processName({}, "", "kworker/0:1"), QStringLiteral("kworker/0:1"));
         QCOMPARE(processName({"renamed-game-with-a-long-name.exe"}, "", "renamed-game-wi"),
                  QStringLiteral("renamed-game-with-a-long-name.exe")); // not cut at 15 like comm
+        // rewritten process titles (as ananicy-cpp-lunar names them)
+        QCOMPARE(processName({"/opt/brave-bin/brave --type=zygote --crashpad-handler-pid=35099"},
+                             "/opt/brave-bin/brave", "brave"), QStringLiteral("brave"));
+        QCOMPARE(processName({"/bin/brave --type=renderer"}, "/usr/bin/brave", "brave"), QStringLiteral("brave"));
+        QCOMPARE(processName({"avahi-daemon: running [host.local]"}, "", "avahi-daemon"),
+                 QStringLiteral("avahi-daemon"));
+        QCOMPARE(processName({"sshd-session: user@pts/0"}, "", "sshd-session"), QStringLiteral("sshd-session"));
+        QCOMPARE(processName({"/games/My Game/game"}, "/games/My Game/game", "game"), QStringLiteral("game"));
+        QCOMPARE(processName({"/games/My Game/game", "--fullscreen"}, "", "game"), QStringLiteral("game"));
+        QCOMPARE(processName({"C:\\Program Files\\Game\\game.exe"}, "", "game.exe"), QStringLiteral("game.exe"));
     }
 
     void needleSuggestions()

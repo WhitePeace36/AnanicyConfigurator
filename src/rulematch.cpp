@@ -263,6 +263,27 @@ QString processName(const QStringList &argv, const QString &exeTarget, const QSt
 {
     if (!argv.isEmpty() && !argv.first().isEmpty()) {
         const QString &a0 = argv.first();
+        // Rewritten process title (setproctitle: Chromium, avahi, sshd, ...): ananicy-cpp-lunar
+        // names the program, its first word ("/opt/brave-bin/brave --type=zygote ..." -> "brave",
+        // "avahi-daemon: running [host]" -> "avahi-daemon"). A first word that is a path only
+        // counts if its file name is that of the executable, so "/games/My Game/game" stays as is.
+        const int space = a0.indexOf(QLatin1Char(' '));
+        if (space > 0 && !a0.endsWith(QLatin1String(".exe"))) {
+            QString head = a0.left(space);
+            if (head.endsWith(QLatin1Char(':')))
+                head.chop(1);
+            const int slash = head.lastIndexOf(QLatin1Char('/'));
+            if (!head.isEmpty() && slash < 0)
+                return head;
+            QString exe = exeTarget;
+            const int del = exe.indexOf(QLatin1String(" (deleted)"));
+            if (del >= 0)
+                exe.truncate(del);
+            const QString file = head.mid(slash + 1);
+            const int exeSlash = exe.lastIndexOf(QLatin1Char('/'));
+            if (slash >= 0 && !file.isEmpty() && exeSlash >= 0 && file == exe.mid(exeSlash + 1))
+                return file;
+        }
         const int cut = a0.endsWith(QLatin1String(".exe"))
                             ? std::max(a0.lastIndexOf(QLatin1Char('/')), a0.lastIndexOf(QLatin1Char('\\')))
                             : a0.lastIndexOf(QLatin1Char('/'));
